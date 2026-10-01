@@ -1,0 +1,368 @@
+using namespace System.Collections
+using namespace System.IO
+
+#Requires -Version 7.2
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)]
+    [Manifest]
+    $Manifest
+)
+
+#region Build
+
+task Clean {
+    if (Test-Path -LiteralPath $Manifest.ReleasePath) {
+        Remove-Item -LiteralPath $Manifest.ReleasePath -Recurse -Force
+    }
+    New-Item -Path $Manifest.ReleasePath -ItemType Directory | Out-Null
+}
+
+task BuildManaged {
+    $arguments = @(
+        'publish'
+        '--configuration', $Manifest.Configuration
+        '--verbosity', 'quiet'
+        '-nologo'
+        "-p:Version=$($Manifest.Module.Version)"
+    )
+
+    $first = $true
+    $csproj = (Get-Item -Path "$($Manifest.DotnetPath)/*.csproj").FullName
+    foreach ($framework in $Manifest.TargetFrameworks) {
+        Write-Host "Compiling for $framework" -ForegroundColor Cyan
+        $outputDir = [Path]::Combine($Manifest.ReleasePath, "bin", $framework)
+        New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
+        dotnet @arguments --framework $framework --output $outputDir $csproj
+
+        if ($LASTEXITCODE) {
+            throw "Failed to compiled code for $framework"
+        }
+
+        $runtimesDir = [Path]::Combine($outputDir, 'runtimes')
+        if (-not (Test-Path -LiteralPath $runtimesDir)) {
+            continue
+        }
+
+        if ($first) {
+            Remove-Item ([Path]::Combine($runtimesDir, 'android*')) -Recurse -Force
+            Remove-Item ([Path]::Combine($runtimesDir, 'ios*')) -Recurse -Force
+            Remove-Item ([Path]::Combine($runtimesDir, 'osx-universal')) -Recurse -Force -ErrorAction Ignore
+            $destRuntimes = [Path]::GetFullPath([Path]::Combine(
+                    $outputDir, '..', 'runtimes'))
+            Move-Item -LiteralPath $runtimesDir -Destination $destRuntimes
+            $first = $false
+        }
+        else {
+            Remove-Item -LiteralPath $runtimesDir -Recurse -Force
+        }
+    }
+}
+
+task BuildModule {
+    $copyParams = @{
+        Path = [Path]::Combine($Manifest.PowerShellPath, '*')
+        Destination = $Manifest.ReleasePath
+        Recurse = $true
+        Force = $true
+    }
+    Copy-Item @copyParams
+}
+
+task BuildDocs {
+    Get-ChildItem -LiteralPath $Manifest.DocsPath -Directory | ForEach-Object {
+        Write-Host "Building docs for $($_.Name)" -ForegroundColor Cyan
+        $outputPath = [Path]::Combine($Manifest.ReleasePath, $_.Name)
+        New-Item -Path $outputPath -ItemType Directory -Force | Out-Null
+
+        $moduleDocs = [Path]::Combine($_.FullName, $Manifest.Module.Name)
+        $commandFiles = Measure-PlatyPSMarkdown -Path ([Path]::Combine($moduleDocs, '*.md')) |
+            Where-Object { $_.FileType -band 'CommandHelp' } |
+            Select-Object -ExpandProperty FilePath
+        $commandHelp = Import-MarkdownCommandHelp -Path $commandFiles
+
+        # Export-MamlCommandHelp writes to a sub folder named after the
+        # module, stage it and move the xml into the culture folder.
+        $stagingPath = [Path]::Combine($Manifest.OutputPath, 'maml', $_.Name)
+        if (Test-Path -LiteralPath $stagingPath) {
+            Remove-Item -LiteralPath $stagingPath -Recurse -Force
+        }
+        Export-MamlCommandHelp -CommandHelp $commandHelp -OutputFolder $stagingPath -Force |
+            Move-Item -Destination $outputPath -Force
+
+        # PlatyPS no longer converts about topics, the help system reads the
+        # markdown as plain text just fine.
+        Get-ChildItem -LiteralPath $moduleDocs -Filter 'about_*.md' -File | ForEach-Object {
+            $dest = [Path]::Combine($outputPath, "$($_.BaseName).help.txt")
+            Copy-Item -LiteralPath $_.FullName -Destination $dest
+        }
+    }
+}
+
+task Sign {
+    $accountName = $env:AZURE_TS_NAME
+    $profileName = $env:AZURE_TS_PROFILE
+    $endpoint = $env:AZURE_TS_ENDPOINT
+    if (-not $accountName -or -not $profileName -or -not $endpoint) {
+        return
+    }
+
+    Write-Host "Authenticating with Azure TrustedSigning $accountName $profileName for signing" -ForegroundColor Cyan
+    $keyParams = @{
+        AccountName = $accountName
+        ProfileName = $profileName
+        Endpoint = $endpoint
+    }
+    $key = Get-OpenAuthenticodeAzTrustedSigner @keyParams
+    $signParams = @{
+        Key = $key
+        TimeStampServer = 'http://timestamp.acs.microsoft.com'
+    }
+
+    $toSign = Get-ChildItem -LiteralPath $Manifest.ReleasePath -Recurse -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Extension -in ".ps1", ".psm1", ".psd1", ".ps1xml" -or (
+                $_.Extension -eq ".dll" -and $_.BaseName -like "$($Manifest.Module.Name)*"
+            )
+        } |
+        ForEach-Object -Process {
+            Write-Host "Signing '$($_.FullName)'"
+            $_.FullName
+        }
+
+    Set-OpenAuthenticodeSignature -LiteralPath $toSign @signParams
+}
+
+task Package {
+    $repoParams = @{
+        Name = "$($Manifest.Module.Name)-Local"
+        Uri = $Manifest.OutputPath
+        Trusted = $true
+        Force = $true
+    }
+    Register-PSResourceRepository @repoParams
+    try {
+        Publish-PSResource -Path $Manifest.ReleasePath -Repository $repoParams.Name -SkipModuleManifestValidate
+    }
+    finally {
+        Unregister-PSResourceRepository -Name $repoParams.Name
+    }
+}
+
+#endregion Build
+
+#region Test
+
+task TestSetup {
+    $wildcardBase = ".*$([regex]::Escape([Path]::DirectorySeparatorChar))"
+    $watchFolder = [Path]::Combine($Manifest.ReleasePath, 'bin', $Manifest.TestFramework)
+
+    # This is used in unit tests to restrict the coverage collector to only the
+    # module assemblies. Only the dlls with a pdb file are generated by us. We
+    # cannot rely on the default in case external pdbs are found by dotnet.
+    # The integration tests ignore this option as PesterTests instruments the
+    # same assemblies explicitly.
+    $includedAssemblies = @(
+        Get-ChildItem -LiteralPath $watchFolder -Filter "*.pdb" | ForEach-Object {
+            "$wildcardBase$([regex]::Escape($_.BaseName))\.dll$"
+        }
+    )
+
+    $config = @{
+        codeCoverage = @{
+            Configuration = @{
+                Format = 'cobertura'
+                DeterministicReport = $env:GITHUB_ACTIONS -eq 'true'
+                # Treats the code after a call to a [DoesNotReturn] method in
+                # another assembly, like Cmdlet.ThrowTerminatingError, as
+                # unreachable. The default only looks in the same assembly.
+                DoesNotReturnAttribute = 'AllAssemblies'
+                CodeCoverage = @{
+                    ModulePaths = @{
+                        Include = $includedAssemblies
+                    }
+                }
+            }
+        }
+    }
+    $configJson = $config | ConvertTo-Json -Depth 5
+    Set-Content -Path $Manifest.TestSettingsPath -Value $configJson -Encoding UTF8
+}
+
+task UnitTests {
+    $testsPath = [Path]::Combine($Manifest.TestPath, 'units')
+    if (-not (Test-Path -LiteralPath $testsPath)) {
+        Write-Host "No unit tests found, skipping" -ForegroundColor Yellow
+        return
+    }
+
+    Get-ChildItem -LiteralPath $testsPath -Directory | ForEach-Object {
+        Write-Host "Running unit tests for $($_.Name)" -ForegroundColor Cyan
+
+        $coveragePath = [Path]::Combine($Manifest.TestResultsPath, "Unit.$($_.Name).Coverage.cobertura.xml")
+        $arguments = @(
+            'test'
+            '--project', $_.FullName
+            '--configuration', $Manifest.Configuration
+            '--results-directory', $Manifest.TestResultsPath
+            '--coverage'
+            '--coverage-output', $coveragePath
+            '--coverage-settings', $Manifest.TestSettingsPath
+        )
+
+        dotnet @arguments
+        if ($LASTEXITCODE) {
+            throw "Unit tests $($_.Name) failed"
+        }
+    }
+}
+
+task PesterTests {
+    $testsPath = [Path]::Combine($Manifest.TestPath, '*.tests.ps1')
+    if (-not (Test-Path -Path $testsPath)) {
+        Write-Host "No Pester tests found, skipping" -ForegroundColor Yellow
+        return
+    }
+
+    $dotnetTools = @(dotnet tool list --global) -join "`n"
+    if (-not $dotnetTools.Contains('dotnet-coverage')) {
+        Write-Host 'Installing dotnet tool dotnet-coverage' -ForegroundColor Yellow
+        dotnet tool install --global dotnet-coverage
+    }
+
+    $pwsh = Assert-PowerShell -Version $Manifest.PowerShellVersion -Arch $Manifest.PowerShellArch
+    $resultsFile = [Path]::Combine($Manifest.TestResultsPath, 'Pester.xml')
+    if (Test-Path -LiteralPath $resultsFile) {
+        Remove-Item $resultsFile -ErrorAction Stop -Force
+    }
+    $pesterScript = [Path]::Combine($PSScriptRoot, 'PesterTest.ps1')
+    $pwshArguments = @(
+        '-NoProfile'
+        '-NonInteractive'
+        if ($IsWindows) {
+            '-ExecutionPolicy', 'Bypass'
+        }
+        '-File', $pesterScript
+        '-TestPath', $Manifest.TestPath
+        '-OutputFile', $resultsFile
+        '-PesterVersion', $Manifest.PesterVersion
+    )
+
+    $watchFolder = [Path]::Combine($Manifest.ReleasePath, 'bin', $Manifest.TestFramework)
+    $coveragePath = [Path]::Combine($Manifest.TestResultsPath, "Integration.Coverage.cobertura.xml")
+    $pwshHome = Split-Path -Path $pwsh -Parent
+
+    # DoesNotReturnAttribute = AllAssemblies needs the instrumenter to resolve
+    # S.M.A to see any pwsh [DoesNotReturn] attribute, for example
+    # Cmdlet.ThrowTerminatingError, and not include the return path as a missed
+    # coverage branch. As the instrumenter needs to resolve the assemblies
+    # correctly, it is important to have the instrumented files in place before
+    # running the tests. Our assemblies (the ones with a pdb) are instrumented
+    # in a copy of the bin folder with the S.M.A of the pwsh under test and then
+    # copied over the module until the tests finish.
+    $sessionId = [Guid]::NewGuid().Guid
+    $instrumentPath = [Path]::Combine($Manifest.TestResultsPath, 'Instrumented')
+    Remove-Item -LiteralPath $instrumentPath -Recurse -Force -ErrorAction Ignore
+    $null = New-Item -Path $instrumentPath -ItemType Directory
+    Copy-Item -Path ([Path]::Combine($watchFolder, '*')) -Destination $instrumentPath
+    Copy-Item -LiteralPath ([Path]::Combine($pwshHome, 'System.Management.Automation.dll')) -Destination $instrumentPath
+
+    $instrumentedFiles = @(
+        Get-ChildItem -LiteralPath $watchFolder -Filter "*.pdb" | ForEach-Object {
+            $dll = "$($_.BaseName).dll"
+            $instrumentArgs = @(
+                'instrument'
+                [Path]::Combine($instrumentPath, $dll)
+                '--session-id', $sessionId
+                '--settings', $Manifest.TestSettingsPath
+                '--nologo'
+            )
+            dotnet-coverage @instrumentArgs | Out-Host
+            if ($LASTEXITCODE) {
+                throw "Failed to instrument $dll"
+            }
+
+            $dll
+            $_.Name
+        }
+    )
+
+    $arguments = @(
+        'collect'
+        $pwsh
+        $pwshArguments
+        '--session-id', $sessionId
+        '--output', $coveragePath
+        '--settings', $Manifest.TestSettingsPath
+    )
+
+    $origEnv = $env:PSModulePath
+    try {
+        foreach ($name in $instrumentedFiles) {
+            Copy-Item -LiteralPath ([Path]::Combine($instrumentPath, $name)) -Destination $watchFolder -Force
+        }
+
+        $env:PSModulePath = @(
+            [Path]::Combine($pwshHome, "Modules")
+            [Path]::Combine($Manifest.OutputPath, "Modules")
+        ) -join ([Path]::PathSeparator)
+
+        dotnet-coverage @arguments
+    }
+    finally {
+        # instrument keeps the original of each file it changes as .orig.
+        foreach ($name in $instrumentedFiles) {
+            Copy-Item -LiteralPath ([Path]::Combine($instrumentPath, "$name.orig")) `
+                -Destination ([Path]::Combine($watchFolder, $name)) -Force
+        }
+        Remove-Item -LiteralPath $instrumentPath -Recurse -Force
+
+        $env:PSModulePath = $origEnv
+    }
+
+    if ($LASTEXITCODE) {
+        throw "Pester failed tests"
+    }
+}
+
+task CoverageReport {
+    $dotnetTools = @(dotnet tool list --global) -join "`n"
+    if (-not $dotnetTools.Contains('dotnet-reportgenerator-globaltool')) {
+        Write-Host 'Installing dotnet tool dotnet-reportgenerator-globaltool' -ForegroundColor Yellow
+        dotnet tool install --global dotnet-reportgenerator-globaltool
+    }
+
+    $mergedCoveragePath = [Path]::Combine($Manifest.TestResultsPath, "Coverage.cobertura.xml")
+    if (Test-Path -LiteralPath $mergedCoveragePath) {
+        Remove-Item $mergedCoveragePath -Force
+    }
+
+    $coverageFiles = Get-ChildItem -Path $Manifest.TestResultsPath -Filter "*.Coverage.cobertura.xml"
+    dotnet-coverage merge $coverageFiles.FullName --output $mergedCoveragePath --output-format cobertura
+    if ($LASTEXITCODE) {
+        throw "Failed to merge coverage files"
+    }
+
+    $reportPath = [Path]::Combine($Manifest.TestResultsPath, "CoverageReport")
+    $reportArgs = @(
+        "-reports:$mergedCoveragePath"
+        "-sourcedirs:$($Manifest.RepositoryPath)/src"
+        "-targetdir:$reportPath"
+        '-filefilters:-*.g.cs'  # Filter out source generated files
+        '-reporttypes:Html_Dark;JsonSummary'
+    )
+    reportgenerator @reportArgs
+    if ($LASTEXITCODE) {
+        throw "reportgenerator failed with RC of $LASTEXITCODE"
+    }
+
+    $coverageScript = [Path]::Combine($PSScriptRoot, 'CoverageReport.ps1')
+    & $coverageScript -Path $mergedCoveragePath
+}
+
+#endregion Test
+
+task Build -Jobs Clean, BuildManaged, BuildModule, BuildDocs, Sign, Package
+
+task Test -Jobs TestSetup, UnitTests, PesterTests, CoverageReport

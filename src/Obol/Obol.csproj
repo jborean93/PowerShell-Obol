@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Kerberos.NET" />
+    <ProjectReference Include="../Obol.Loader/Obol.Loader.csproj" />
+    <!-- PowerShell provides S.M.A at runtime, it must not be published with the module. -->
+    <PackageReference Include="System.Management.Automation" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
