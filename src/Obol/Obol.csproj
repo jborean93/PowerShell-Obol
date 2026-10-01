@@ -5,8 +5,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Kerberos.NET" />
+    <InternalsVisibleTo Include="Obol.Tests" />
+
     <ProjectReference Include="../Obol.Loader/Obol.Loader.csproj" />
+    <PackageReference Include="Kerberos.NET" />
     <!-- PowerShell provides S.M.A at runtime, it must not be published with the module. -->
     <PackageReference Include="System.Management.Automation" ExcludeAssets="runtime" PrivateAssets="all" />
   </ItemGroup>

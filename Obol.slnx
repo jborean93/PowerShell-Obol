@@ -3,5 +3,7 @@
     <Project Path="src/Obol.Loader/Obol.Loader.csproj" />
     <Project Path="src/Obol/Obol.csproj" />
   </Folder>
-  <Folder Name="/tests/" />
+  <Folder Name="/tests/">
+    <Project Path="tests/units/Obol.Tests/Obol.Tests.csproj" />
+  </Folder>
 </Solution>

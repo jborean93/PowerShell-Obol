@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Configuration>
+  <ViewDefinitions>
+    <View>
+      <Name>Obol.ObolKdc</Name>
+      <ViewSelectedBy>
+        <TypeName>Obol.ObolKdc</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem>
+                <PropertyName>Realm</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Endpoint</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Transport</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>State</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>StartTime</PropertyName>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+    <View>
+      <Name>Obol.ObolPrincipal</Name>
+      <ViewSelectedBy>
+        <TypeName>Obol.ObolPrincipal</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem>
+                <PropertyName>FullName</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Kvno</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>EncryptionType</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Flag</PropertyName>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
+  </ViewDefinitions>
+</Configuration>

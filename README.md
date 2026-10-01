@@ -9,6 +9,10 @@ PowerShell module that runs a Kerberos KDC endpoint based on [Kerberos.NET](http
 
 See [about_Obol](docs/en-US/Obol/about_Obol.md) for more details.
 
+> [!WARNING]
+> Obol is designed for testing and learning purposes.
+> It should not be considered a secure solution for production environments and must not be used as the KDC for a real realm.
+
 ## Documentation
 
 Documentation for this module and details on the cmdlets included can be found [here](docs/en-US/Obol/Obol.md).

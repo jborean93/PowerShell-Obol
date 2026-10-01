@@ -8,6 +8,9 @@
     <!-- Module Deps -->
     <PackageVersion Include="Kerberos.NET" Version="4.6.168" />
     <PackageVersion Include="System.Management.Automation" Version="7.6.0" />
+
+    <!-- Testing -->
+    <PackageVersion Include="TUnit" Version="1.69.0" />
   </ItemGroup>
 
 </Project>

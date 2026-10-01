@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="TUnit" />
+    <!--
+    The tests run the KDC listener and principal store directly with the Kerberos.NET client. They do not use ObolKdc
+    or the cmdlets so System.Management.Automation is not loaded at runtime.
+    -->
+    <ProjectReference Include="../../../src/Obol/Obol.csproj" />
+  </ItemGroup>
+</Project>

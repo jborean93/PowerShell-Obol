@@ -18,7 +18,7 @@ runs a Kerberos Key Distribution Center (KDC) endpoint built on
 | `manifest.psd1` | Pinned versions of the PowerShell build/test modules (InvokeBuild, Pester, Microsoft.PowerShell.PlatyPS, PSResourceGet, OpenAuthenticode). |
 | `global.json` | Pins the .NET SDK (10.0.x) and selects `Microsoft.Testing.Platform` as the `dotnet test` runner. |
 | `Obol.slnx` | Solution file listing the `src/` projects. |
-| `src/Obol/` | The PowerShell module assembly. Cmdlets live in `src/Obol/Commands/`. |
+| `src/Obol/` | The PowerShell module assembly. See [Namespaces](#namespaces) for how the code is split between the root, `Commands/` and `Protocol/`. |
 | `src/Obol.Loader/` | Tiny `AssemblyLoadContext` used by `module/Obol.psm1` to isolate the module's dependencies, like Kerberos.NET, from the host process. |
 | `src/Directory.Build.props` | Shared compiler settings (nullable enabled, unsafe allowed). |
 | `src/Directory.Packages.props` | Central package management. All NuGet versions live here; `.csproj` files reference packages without a `Version`. |
@@ -26,7 +26,7 @@ runs a Kerberos Key Distribution Center (KDC) endpoint built on
 | `docs/en-US/Obol/` | Microsoft.PowerShell.PlatyPS markdown help (PlatyPS always nests pages under a folder named after the module). Cmdlet pages are compiled to MAML and `about_*.md` pages are copied as `about_*.help.txt` at build time. Edit the prose here; run `tools/UpdateDocs.ps1` to sync the syntax and parameter metadata. |
 | `tests/*.Tests.ps1` | Pester tests that run against the built module. |
 | `tests/common.ps1` | Dot-sourced by every Pester file. Imports the built module. |
-| `tests/units/<Project>/` | .NET unit test projects (TUnit). Each directory is discovered and run automatically by the `Test` task. None exist yet. |
+| `tests/units/<Project>/` | .NET unit test projects (TUnit). Each directory is discovered and run automatically by the `Test` task. `Obol.Tests` runs the KDC against the Kerberos.NET client and hand-built requests. |
 | `tools/` | Scripts used by `build.ps1`. `InvokeBuild.ps1` defines the tasks; `common.ps1` holds the `Manifest` class and helpers. `UpdateDocs.ps1` regenerates the markdown help from the built module. |
 | `output/` | Git-ignored. Built module, nupkg, downloaded PowerShell versions, cached build modules, and test results all land here. Never commit or hand-edit it. |
 | `scratch/` | Git-ignored. Working space for files that should not be committed: notes, logs, captures, throwaway scripts. Kept across sessions and builds. See [Scratch files](#scratch-files). |
@@ -126,6 +126,9 @@ signed with Azure Trusted Signing and published to the PowerShell Gallery.
   `LangVersion`), `Nullable` enabled, file-scoped namespaces, 4-space indent.
   Private static fields use the `s_` prefix, private instance fields
   `_camelCase`.
+- Keep lines to 120 characters or fewer, including doc comments and test
+  data. Nothing enforces it, so check with
+  `awk 'length > 120' $(git ls-files '*.cs')` before finishing.
 - Line endings are LF everywhere (`.gitattributes` sets `text=auto`). Trim
   trailing whitespace and end files with a newline.
 - `.editorconfig` raises a chosen set of IDE rules to warnings, which are
@@ -143,6 +146,28 @@ signed with Azure Trusted Signing and published to the PowerShell Gallery.
   must be deleted by hand.
 - Add a line to `CHANGELOG.md` under the unreleased heading for anything a
   user would notice.
+- Put each type in its own file named after the type, such as `ObolKdcState`
+  in `ObolKdcState.cs`, including small enums, exceptions and records. Nested
+  types stay in their parent's file. A tiny type that only makes sense next to
+  another one may share its file, but prefer a separate file.
+
+### Namespaces
+
+The namespace matches the folder under `src/Obol/`:
+
+| Namespace | Folder | Contents |
+| --- | --- | --- |
+| `Obol` | `src/Obol/` | The public types PowerShell sees (`ObolKdc`, `ObolPrincipal`, `ObolPrincipalSetting`, the enums), argument completers and other PowerShell glue, and the hosting code such as the `KdcListener` sockets and per-runspace state. |
+| `Obol.Commands` | `src/Obol/Commands/` | The cmdlets and the helpers shared between them. |
+| `Obol.Protocol` | `src/Obol/Protocol/` | The Kerberos logic: processing requests into replies, ticket policy, principal names, and the principals and their keys. |
+
+`Obol.Protocol` is the only namespace that uses Kerberos.NET. Code in `Obol`
+and `Obol.Commands` must not reference Kerberos.NET types, it calls into
+`Obol.Protocol` with built-in or `Obol` types instead, such as
+`ObolEncryptionType` rather than the Kerberos.NET `EncryptionType`. Every type
+in `Obol.Protocol` must be `internal`, a public one would put Kerberos.NET on
+the public type surface (see below). Do not create other namespaces, such as
+one per kind of type, without a reason like this.
 
 ### Public type surface
 

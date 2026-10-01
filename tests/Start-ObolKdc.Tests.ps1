@@ -1,19 +1,957 @@
+using namespace System.Collections.Generic
+using namespace System.Formats.Asn1
 using namespace System.IO
+using namespace System.Management.Automation
+using namespace System.Management.Automation.Runspaces
+using namespace System.Net
+using namespace System.Net.Sockets
+using namespace System.Reflection
 using namespace System.Runtime.Loader
 
-BeforeDiscovery {
-    . ([Path]::Combine($PSScriptRoot, 'common.ps1'))
+BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
+
+BeforeAll {
+    # The KRB-ERROR codes the tests expect, RFC 4120 7.5.9.
+    $KrbErrorCode = @{
+        KDC_ERR_C_PRINCIPAL_UNKNOWN = 6
+        KRB_ERR_RESPONSE_TOO_BIG = 52
+        KRB_ERR_GENERIC = 60
+        KRB_ERR_FIELD_TOOLONG = 61
+        KDC_ERR_WRONG_REALM = 68
+    }
+
+    # Builds a minimal AS-REQ for the user. The KDCs in these tests have no principals other than krbtgt, so a
+    # KDC that receives and processes the request replies with a KDC_ERR_C_PRINCIPAL_UNKNOWN error. The tests use
+    # this to check the KDC answers on an address or transport without needing a real login.
+    Function New-AsReq {
+        param ([string]$Realm, [string]$UserName)
+
+        # Kerberos strings are GeneralString which AsnWriter cannot write directly.
+        Function Write-KerberosString([AsnWriter]$Writer, [string]$Value) {
+            $bytes = [Text.Encoding]::ASCII.GetBytes($Value)
+            $length = if ($bytes.Length -lt 0x80) {
+                , $bytes.Length
+            }
+            else {
+                0x82, ($bytes.Length -shr 8), ($bytes.Length -band 0xFF)
+            }
+            $Writer.WriteEncodedValue([byte[]](@(0x1B) + $length + $bytes))
+        }
+
+        Function Write-PrincipalName([AsnWriter]$Writer, [int]$Tag, [int]$NameType, [string[]]$Name) {
+            $null = $Writer.PushSequence([Asn1Tag]::new([TagClass]::ContextSpecific, $Tag, $true))
+            $null = $Writer.PushSequence()
+            $null = $Writer.PushSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 0, $true))
+            $Writer.WriteInteger($NameType)
+            $Writer.PopSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 0, $true))
+            $null = $Writer.PushSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 1, $true))
+            $null = $Writer.PushSequence()
+            foreach ($n in $Name) {
+                Write-KerberosString $Writer $n
+            }
+            $Writer.PopSequence()
+            $Writer.PopSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 1, $true))
+            $Writer.PopSequence()
+            $Writer.PopSequence([Asn1Tag]::new([TagClass]::ContextSpecific, $Tag, $true))
+        }
+
+        Function Write-Explicit([AsnWriter]$Writer, [int]$Tag, [scriptblock]$Value) {
+            $t = [Asn1Tag]::new([TagClass]::ContextSpecific, $Tag, $true)
+            $null = $Writer.PushSequence($t)
+            & $Value
+            $Writer.PopSequence($t)
+        }
+
+        $w = [AsnWriter]::new([AsnEncodingRules]::DER)
+        $appTag = [Asn1Tag]::new([TagClass]::Application, 10, $true)
+        $null = $w.PushSequence($appTag)
+        $null = $w.PushSequence()
+        Write-Explicit $w 1 { $w.WriteInteger(5) }  # pvno
+        Write-Explicit $w 2 { $w.WriteInteger(10) }  # msg-type
+        Write-Explicit $w 4 {
+            $null = $w.PushSequence()
+            Write-Explicit $w 0 { $w.WriteBitString([byte[]]::new(4)) }  # kdc-options
+            Write-PrincipalName $w 1 1 $UserName  # cname, NT-PRINCIPAL
+            Write-Explicit $w 2 { Write-KerberosString $w $Realm }
+            Write-PrincipalName $w 3 2 'krbtgt', $Realm  # sname, NT-SRV-INST
+            Write-Explicit $w 5 { $w.WriteGeneralizedTime([DateTimeOffset]::UtcNow.AddHours(1), $true) }  # till
+            Write-Explicit $w 7 { $w.WriteInteger(1234) }  # nonce
+            Write-Explicit $w 8 {
+                $null = $w.PushSequence()
+                $w.WriteInteger(18)  # aes256-cts-hmac-sha1-96
+                $w.PopSequence()
+            }
+            $w.PopSequence()
+        }
+        $w.PopSequence()
+        $w.PopSequence($appTag)
+
+        , $w.Encode()
+    }
+
+    Function Invoke-KdcRequest {
+        param ([int]$Port, [byte[]]$Request, [switch]$Udp, [IPAddress]$Address = [IPAddress]::Loopback)
+
+        if ($Udp) {
+            $client = [UdpClient]::new($Address.AddressFamily)
+            try {
+                $client.Client.ReceiveTimeout = 5000
+                $null = $client.Send($Request, $Request.Length, [IPEndPoint]::new($Address, $Port))
+                $remote = $null
+                , $client.Receive([ref]$remote)
+            }
+            finally {
+                $client.Dispose()
+            }
+            return
+        }
+
+        $client = [TcpClient]::new($Address.AddressFamily)
+        try {
+            $client.Connect($Address, $Port)
+            $stream = $client.GetStream()
+            $length = [byte[]]::new(4)
+            [Buffers.Binary.BinaryPrimitives]::WriteInt32BigEndian($length, $Request.Length)
+            $stream.Write($length, 0, 4)
+            $stream.Write($Request, 0, $Request.Length)
+
+            $stream.ReadExactly($length, 0, 4)
+            $response = [byte[]]::new([Buffers.Binary.BinaryPrimitives]::ReadInt32BigEndian($length))
+            $stream.ReadExactly($response, 0, $response.Length)
+            , $response
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
+
+    Function Get-KrbError {
+        param ([byte[]]$Response)
+
+        $reader = [AsnReader]::new($Response, [AsnEncodingRules]::DER)
+        $krbError = $reader.ReadSequence([Asn1Tag]::new([TagClass]::Application, 30, $true)).ReadSequence()
+        $result = [Ordered]@{ ErrorCode = $null; EText = $null; CusecLength = $null }
+
+        # The KRB-ERROR fields used are [3] cusec, [6] error-code and [11] e-text, RFC 4120 5.9.1.
+        while ($krbError.HasData) {
+            $tag = $krbError.PeekTag()
+            $field = $krbError.ReadSequence($tag)
+            if ($tag.TagValue -eq 3) {
+                # The content length of the cusec INTEGER, it varies with the time of the reply.
+                $result.CusecLength = [int]$field.ReadEncodedValue().ToArray()[1]
+            }
+            elseif ($tag.TagValue -eq 6) {
+                $result.ErrorCode = [int]$field.ReadInteger()
+            }
+            elseif ($tag.TagValue -eq 11) {
+                # GeneralString, skip the tag and length header.
+                $value = $field.ReadEncodedValue().ToArray()
+                $offset = if ($value[1] -lt 0x80) { 2 } else { 2 + ($value[1] -band 0x7F) }
+                $result.EText = [Text.Encoding]::ASCII.GetString($value, $offset, $value.Length - $offset)
+            }
+        }
+        [PSCustomObject]$result
+    }
+
+    Function Get-KrbErrorCode {
+        param ([byte[]]$Response)
+
+        (Get-KrbError $Response).ErrorCode
+    }
+
+    Function Write-TcpRequest {
+        param ([IO.Stream]$Stream, [byte[]]$Request)
+
+        $length = [byte[]]::new(4)
+        [Buffers.Binary.BinaryPrimitives]::WriteInt32BigEndian($length, $Request.Length)
+        $Stream.Write($length, 0, 4)
+        $Stream.Write($Request, 0, $Request.Length)
+    }
+
+    Function Read-TcpResponse {
+        param ([IO.Stream]$Stream)
+
+        $length = [byte[]]::new(4)
+        $Stream.ReadExactly($length, 0, 4)
+        $response = [byte[]]::new([Buffers.Binary.BinaryPrimitives]::ReadInt32BigEndian($length))
+        $Stream.ReadExactly($response, 0, $response.Length)
+        , $response
+    }
+
+    Function Test-PortFree {
+        param ([int]$Port, [switch]$Udp)
+
+        try {
+            if ($Udp) {
+                [UdpClient]::new([IPEndPoint]::new([IPAddress]::Loopback, $Port)).Dispose()
+            }
+            else {
+                $listener = [TcpListener]::new([IPAddress]::Loopback, $Port)
+                $listener.Start()
+                $listener.Stop()
+            }
+            $true
+        }
+        catch [SocketException] {
+            $false
+        }
+    }
+
+    Function Get-FreePort {
+        $listener = [TcpListener]::new([IPAddress]::Loopback, 0)
+        $listener.Start()
+        try {
+            $listener.LocalEndpoint.Port
+        }
+        finally {
+            $listener.Stop()
+        }
+    }
 }
 
 Describe "Start-ObolKdc" {
-    It "Outputs the Obol string" {
-        $actual = Start-ObolKdc
+    AfterEach {
+        Get-ObolKdc | Stop-ObolKdc
+    }
 
-        $actual | Should-HaveType ([string])
-        $actual | Should-BeLikeString 'Obol KDC using Kerberos.NET *'
+    It "Starts a KDC on a random loopback port" {
+        $kdc = Start-ObolKdc -Realm EXAMPLE.TEST
+
+        $kdc | Should-HaveType ([Obol.ObolKdc])
+        $kdc.Realm | Should-Be EXAMPLE.TEST
+        $kdc.Endpoint.Address | Should-Be ([IPAddress]::Loopback)
+        $kdc.Port | Should-BeGreaterThan 0
+        $kdc.Port | Should-Be $kdc.Endpoint.Port
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Running)
+        $kdc.Error | Should-BeNull
+        $kdc.Transport | Should-Be ([Obol.ObolKdcTransport]'Tcp, Udp')
+        $kdc.MaxUdpReplySize | Should-Be 4096
+        $kdc.CaseInsensitivePrincipal | Should-BeFalse
+        $kdc.DomainSid | Should-MatchString '^S-1-5-21-\d+-\d+-\d+$'
+        $kdc.StartTime | Should-BeBefore -Expected ([DateTime]::Now.AddSeconds(1))
+        $kdc.ToString() | Should-Be "EXAMPLE.TEST (127.0.0.1:$($kdc.Port))"
+
+        $actual = Get-ObolKdc
+        $actual | Should-BeSame $kdc
+    }
+
+    It "Starts a KDC on a specific port" {
+        $port = Get-FreePort
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Port $port
+
+        $kdc.Port | Should-Be $port
+    }
+
+    It "Starts a KDC on an IPv6 address" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Address ([IPAddress]::IPv6Loopback)
+
+        $kdc.Endpoint.Address | Should-Be ([IPAddress]::IPv6Loopback)
+        $request = New-AsReq EXAMPLE.TEST user
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request -Address ([IPAddress]::IPv6Loopback)
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request -Address ([IPAddress]::IPv6Loopback) -Udp
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Starts a KDC on all IPv4 addresses" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Address ([IPAddress]::Any)
+
+        $kdc.Endpoint.Address | Should-Be ([IPAddress]::Any)
+        $request = New-AsReq EXAMPLE.TEST user
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request -Udp
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Starts a KDC on all addresses" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Address ([IPAddress]::IPv6Any)
+
+        # IPv6Any is dual mode so IPv4 clients can connect.
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user)
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Responds to an AS-REQ over UDP" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user) -Udp
+
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Responds over UDP on all addresses" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Address ([IPAddress]::IPv6Any)
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user) -Udp
+
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Responds with KRB_ERR_RESPONSE_TOO_BIG when the UDP reply is too large" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        # The wrong realm error includes the realm so a long realm makes a reply larger than a datagram allows.
+        $realm = 'A' * 5000
+        $request = New-AsReq $realm user
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request -Udp
+        $actual = Get-KrbError $response
+        $actual.ErrorCode | Should-Be $KrbErrorCode.KRB_ERR_RESPONSE_TOO_BIG
+        $actual.EText | Should-BeLikeString '*too big for UDP, retry over TCP'
+
+        # The same request over TCP gets the full reply.
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request
+        $response.Length | Should-BeGreaterThan 4096
+        $actual = Get-KrbError $response
+        $actual.ErrorCode | Should-Be $KrbErrorCode.KDC_ERR_WRONG_REALM
+        $actual.EText | Should-BeLikeString "*'$realm'"
+    }
+
+    It "Responds with an error to an invalid UDP request" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request ([byte[]]@(0x6A)) -Udp
+
+        $actual = Get-KrbError $response
+        $actual.ErrorCode | Should-Be $KrbErrorCode.KRB_ERR_GENERIC
+        $actual.EText | Should-BeLikeString 'Failed to process request: *'
+    }
+
+    It "Ignores an empty UDP datagram" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $request = New-AsReq EXAMPLE.TEST user
+        $remote = [IPEndPoint]::new([IPAddress]::Loopback, $kdc.Port)
+
+        $client = [UdpClient]::new()
+        try {
+            $null = $client.Send([byte[]]::new(0), 0, $remote)
+            $null = $client.Send($request, $request.Length, $remote)
+
+            # Collect every reply until none arrive for a second, only the real request is answered.
+            $client.Client.ReceiveTimeout = 1000
+            $codes = while ($true) {
+                try {
+                    $from = $null
+                    Get-KrbErrorCode $client.Receive([ref]$from)
+                }
+                catch [SocketException] {
+                    break
+                }
+            }
+        }
+        finally {
+            $client.Dispose()
+        }
+
+        $codes | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Sends a UDP reply exactly at the size limit" {
+        # A KRB-ERROR includes the current microseconds as a DER INTEGER so its length varies by up to 2 bytes.
+        # The longest form, a 3 byte value, is used for nearly every reply.
+        $request = New-AsReq EXAMPLE.TEST user
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Transport Tcp
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request
+        $maxLength = $response.Length + 3 - (Get-KrbError $response).CusecLength
+        $kdc.Dispose()
+
+        # At the limit every reply fits, retry until one is exactly the limit to check the boundary.
+        $kdc = Start-ObolKdc EXAMPLE.TEST -MaxUdpReplySize $maxLength
+        $exact = $false
+        foreach ($i in 1..20) {
+            $response = Invoke-KdcRequest -Port $kdc.Port -Request $request -Udp
+            Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+            if ($response.Length -eq $maxLength) {
+                $exact = $true
+                break
+            }
+        }
+        $exact | Should-BeTrue
+        $kdc.Dispose()
+
+        # One byte under the limit, a reply of the longest form is too big.
+        $kdc = Start-ObolKdc EXAMPLE.TEST -MaxUdpReplySize ($maxLength - 1)
+        $tooBig = $false
+        foreach ($i in 1..20) {
+            $actual = Get-KrbError (Invoke-KdcRequest -Port $kdc.Port -Request $request -Udp)
+            if ($actual.ErrorCode -eq 52) {
+                $actual.EText | Should-Be "Response of $maxLength bytes is too big for UDP, retry over TCP"
+                $tooBig = $true
+                break
+            }
+            $actual.ErrorCode | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+        }
+        $tooBig | Should-BeTrue
+    }
+
+    It "Responds to concurrent clients" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $request = New-AsReq EXAMPLE.TEST user
+        $remote = [IPEndPoint]::new([IPAddress]::Loopback, $kdc.Port)
+        $udpClients = [List[UdpClient]]::new()
+        $tcpClients = [List[TcpClient]]::new()
+        try {
+            # Send every request before reading any reply so they are all outstanding at once.
+            foreach ($i in 1..20) {
+                $udp = [UdpClient]::new()
+                $udp.Client.ReceiveTimeout = 5000
+                $udpClients.Add($udp)
+                $null = $udp.Send($request, $request.Length, $remote)
+
+                $tcp = [TcpClient]::new()
+                $tcpClients.Add($tcp)
+                $tcp.Connect([IPAddress]::Loopback, $kdc.Port)
+                Write-TcpRequest $tcp.GetStream() $request
+            }
+
+            foreach ($udp in $udpClients) {
+                $from = $null
+                Get-KrbErrorCode $udp.Receive([ref]$from) | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+            }
+            foreach ($tcp in $tcpClients) {
+                $response = Read-TcpResponse $tcp.GetStream()
+                Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+            }
+        }
+        finally {
+            $udpClients | ForEach-Object Dispose
+            $tcpClients | ForEach-Object Dispose
+        }
+    }
+
+    It "Starts a KDC for <Transport> only" -TestCases @(
+        @{ Transport = 'Tcp'; Other = 'Udp' }
+        @{ Transport = 'Udp'; Other = 'Tcp' }
+    ) {
+        param ($Transport, $Other)
+
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Transport $Transport
+
+        $kdc.Transport | Should-Be ([Obol.ObolKdcTransport]$Transport)
+        Test-PortFree -Port $kdc.Port -Udp:($Transport -eq 'Udp') | Should-BeFalse
+        Test-PortFree -Port $kdc.Port -Udp:($Other -eq 'Udp') | Should-BeTrue
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user) -Udp:($Transport -eq 'Udp')
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Starts a KDC with -Transport Tcp, Udp" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Transport Tcp, Udp
+
+        $kdc.Transport | Should-Be ([Obol.ObolKdcTransport]'Tcp, Udp')
+    }
+
+    It "Fails with an invalid transport <Value>" -TestCases @(
+        @{ Value = 0; ErrorId = 'InvalidTransport' }
+        @{ Value = 4; ErrorId = 'CannotConvertArgumentNoMessage' }
+        @{ Value = [Enum]::ToObject([Obol.ObolKdcTransport], 4); ErrorId = 'InvalidTransport' }
+        @{ Value = [Enum]::ToObject([Obol.ObolKdcTransport], 5); ErrorId = 'InvalidTransport' }
+    ) {
+        param ($Value, $ErrorId)
+
+        { Start-ObolKdc EXAMPLE.TEST -Transport $Value } |
+            Should-Throw -FullyQualifiedErrorId "$ErrorId,Obol.Commands.StartObolKdc"
+        Get-ObolKdc | Should-BeNull
+    }
+
+    It "Uses a custom UDP reply size limit" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -MaxUdpReplySize 50
+        $request = New-AsReq EXAMPLE.TEST user
+
+        $kdc.MaxUdpReplySize | Should-Be 50
+
+        $actual = Get-KrbError (Invoke-KdcRequest -Port $kdc.Port -Request $request -Udp)
+        $actual.ErrorCode | Should-Be $KrbErrorCode.KRB_ERR_RESPONSE_TOO_BIG
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request $request
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Fails with an invalid UDP reply size <Value>" -TestCases @(
+        @{ Value = 0 }
+        @{ Value = 65508 }
+    ) {
+        param ($Value)
+
+        { Start-ObolKdc EXAMPLE.TEST -MaxUdpReplySize $Value } |
+            Should-Throw -FullyQualifiedErrorId 'ParameterArgumentValidationError,Obol.Commands.StartObolKdc'
+    }
+
+    It "Starts a KDC with -CaseInsensitivePrincipal" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -CaseInsensitivePrincipal
+
+        $kdc.CaseInsensitivePrincipal | Should-BeTrue
+    }
+
+    It "Creates principals with -Principal" {
+        $password = ConvertTo-SecureString -String 'Password123!' -AsPlainText -Force
+
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Principal ([ordered]@{
+            user = $password
+            'HTTP/web.example.test' = $null
+            roast = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth
+            'HTTP/sql' = New-ObolPrincipalSetting -EncryptionType Aes128Sha1 -Alias MSSQLSvc/sql, HTTP/db
+            admin = New-ObolPrincipalSetting -Password $password -Rid 500
+            setting = New-ObolPrincipalSetting -Rid 600 -Alias other
+            cast = [Obol.ObolPrincipalSetting]@{ Flag = 'DoesNotRequirePreAuth' }
+        })
+
+        $actual = Get-ObolPrincipal -Kdc $kdc
+        $actual.FullName | Should-BeCollection @(
+            'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
+            'user@EXAMPLE.TEST'
+            'HTTP/web.example.test@EXAMPLE.TEST'
+            'roast@EXAMPLE.TEST'
+            'HTTP/sql@EXAMPLE.TEST'
+            'admin@EXAMPLE.TEST'
+            'setting@EXAMPLE.TEST'
+            'cast@EXAMPLE.TEST'
+        )
+        $actual[1].Sid | Should-Be "$($kdc.DomainSid)-1000"
+        $actual[3].Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
+        $actual[4].EncryptionType | Should-Be ([Obol.ObolEncryptionType]::Aes128Sha1)
+        $actual[4].Alias | Should-BeCollection @('MSSQLSvc/sql', 'HTTP/db')
+        $actual[5].Sid | Should-Be "$($kdc.DomainSid)-500"
+        $actual[6].Sid | Should-Be "$($kdc.DomainSid)-600"
+        $actual[6].Alias | Should-BeCollection @('other')
+        $actual[7].Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
+    }
+
+    It "Fails with an invalid -Principal <Case>" -TestCases @(
+        @{ Case = 'value'; Value = @{ user = 'plaintext' }; ErrorId = 'InvalidPrincipalArgument'; Message = "Invalid principal 'user' in -Principal: The value must be null for random keys, a SecureString password, or an ObolPrincipalSetting, got 'System.String'" }
+        @{ Case = 'hashtable'; Value = @{ user = @{ Rid = 500 } }; ErrorId = 'InvalidPrincipalArgument'; Message = "Invalid principal 'user' in -Principal: The value must be null for random keys, a SecureString password, or an ObolPrincipalSetting, got 'System.Collections.Hashtable'" }
+        @{ Case = 'rid'; Value = @{ user = [Obol.ObolPrincipalSetting]@{ Rid = 0 } }; ErrorId = 'InvalidRid'; Message = 'The RID must be greater than 0, got 0' }
+        @{ Case = 'alias'; Value = @{ user = [Obol.ObolPrincipalSetting]@{ Alias = @($null) } }; ErrorId = 'InvalidPrincipalName'; Message = 'An alias must not be null or empty' }
+        @{ Case = 'password'; Value = @{ user = [Obol.ObolPrincipalSetting]@{ Password = [SecureString]::new() } }; ErrorId = 'EmptyPassword'; Message = 'The password must not be empty' }
+        @{ Case = 'name'; Value = @{ 'a//b' = $null }; ErrorId = 'InvalidPrincipalName'; Message = "Invalid principal name 'a//b': a name component is empty" }
+        @{ Case = 'duplicate'; Value = @{ 'krbtgt/EXAMPLE.TEST' = $null }; ErrorId = 'PrincipalAlreadyExists'; Message = "The principal name 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST' is already used" }
+    ) {
+        param ($Value, $ErrorId, $Message)
+
+        $err = { Start-ObolKdc EXAMPLE.TEST -Principal $Value } |
+            Should-Throw -FullyQualifiedErrorId "$ErrorId,Obol.Commands.StartObolKdc"
+        $err.Exception.Message | Should-BeLikeString $Message
+
+        # The KDC is stopped and not listed.
+        Get-ObolKdc | Should-BeNull
+    }
+
+    It "Uses the domain SID '<Value>'" -TestCases @(
+        @{ Value = 'S-1-5-21-1-2-3'; Expected = 'S-1-5-21-1-2-3' }
+        @{ Value = 's-1-5-21-4294967295-0-123'; Expected = 'S-1-5-21-4294967295-0-123' }
+    ) {
+        param ($Value, $Expected)
+
+        $kdc = Start-ObolKdc EXAMPLE.TEST -DomainSid $Value -Principal @{ user = $null }
+
+        $kdc.DomainSid | Should-Be $Expected
+        (Get-ObolPrincipal -Kdc $kdc).Sid | Should-BeCollection @("$Expected-502", "$Expected-1000")
+    }
+
+    It "Fails with an invalid domain SID '<Value>'" -TestCases @(
+        @{ Value = 'S-1-5-21-1-2' }
+        @{ Value = 'S-1-5-21-1-2-3-4' }
+        @{ Value = 'S-1-5-32-1-2-3' }
+        @{ Value = 'S-1-5-21-1-2-4294967296' }
+        @{ Value = 'S-1-5-21-1-2--3' }
+        @{ Value = 'S-1-5-21-a-b-c' }
+    ) {
+        param ($Value)
+
+        $err = { Start-ObolKdc EXAMPLE.TEST -DomainSid $Value } |
+            Should-Throw -FullyQualifiedErrorId 'InvalidDomainSid,Obol.Commands.StartObolKdc'
+        $err.Exception.Message | Should-Be "The domain SID '$Value' must be in the form S-1-5-21-<a>-<b>-<c> where each value is a 32-bit unsigned integer"
+        Get-ObolKdc | Should-BeNull
+    }
+
+    It "Gives each KDC a different domain SID" {
+        $kdc1 = Start-ObolKdc EXAMPLE.TEST
+        $kdc2 = Start-ObolKdc EXAMPLE.TEST
+
+        $kdc1.DomainSid | Should-NotBe $kdc2.DomainSid
+    }
+
+    It "Creates the krbtgt principal" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $actual = Get-ObolPrincipal -Kdc $kdc
+
+        $actual.FullName | Should-Be 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
+        $actual.Sid | Should-Be "$($kdc.DomainSid)-502"
+    }
+
+    It "Matches the realm case sensitively" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $actual = Get-KrbError (Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq example.test user))
+
+        $actual.ErrorCode | Should-Be $KrbErrorCode.KDC_ERR_WRONG_REALM
+        $actual.EText | Should-Be "The KDC does not serve the realm 'example.test'"
+    }
+
+    It "Fails with an invalid realm '<Value>'" -TestCases @(
+        @{ Value = 'EX/AMPLE' }
+        @{ Value = 'EX@AMPLE' }
+        @{ Value = 'EX\AMPLE' }
+        @{ Value = "EX`tAMPLE" }
+    ) {
+        param ($Value)
+
+        $err = { Start-ObolKdc $Value } | Should-Throw -FullyQualifiedErrorId 'InvalidRealm,Obol.Commands.StartObolKdc'
+        $err.Exception.Message | Should-Be "The realm '$Value' must not contain '/', '@', '\' or control characters"
+        Get-ObolKdc | Should-BeNull
+    }
+
+    It "Serves a lower case realm" {
+        $kdc = Start-ObolKdc example.test
+
+        $kdc.Realm | Should-Be example.test
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq example.test user)
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user)
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_WRONG_REALM
+    }
+
+    It "Sets the state to faulted when a receive loop fails" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $port = $kdc.Port
+        $err = [InvalidOperationException]::new('test fault')
+
+        # There is no reliable way to make a socket fail, call the fault handler the listener uses directly.
+        $onFault = [Obol.ObolKdc].GetMethod('OnFault', [BindingFlags]'Instance, NonPublic')
+        $null = $onFault.Invoke($kdc, @($err))
+
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Faulted)
+        $kdc.Error | Should-BeSame $err
+
+        # The listener is stopped in the background.
+        $timeout = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-PortFree $port) -and [DateTime]::UtcNow -lt $timeout) {
+            Start-Sleep -Milliseconds 50
+        }
+        Test-PortFree $port | Should-BeTrue
+        Test-PortFree $port -Udp | Should-BeTrue
+
+        # It stays listed until stopped so the failure is visible.
+        Get-ObolKdc | Should-BeSame $kdc
+        $kdc | Stop-ObolKdc
+        Get-ObolKdc | Should-BeNull
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Faulted)
+    }
+
+    It "Keeps the first fault" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $first = [InvalidOperationException]::new('first')
+        $onFault = [Obol.ObolKdc].GetMethod('OnFault', [BindingFlags]'Instance, NonPublic')
+
+        $null = $onFault.Invoke($kdc, @($first))
+        $null = $onFault.Invoke($kdc, @([InvalidOperationException]::new('second')))
+
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Faulted)
+        $kdc.Error | Should-BeSame $first
+    }
+
+    It "Ignores a fault after the KDC is stopped" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $kdc.Dispose()
+        $onFault = [Obol.ObolKdc].GetMethod('OnFault', [BindingFlags]'Instance, NonPublic')
+
+        $null = $onFault.Invoke($kdc, @([InvalidOperationException]::new('late')))
+
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Stopped)
+        $kdc.Error | Should-BeNull
+    }
+
+    It "Completes -Address with '<Word>'" -TestCases @(
+        @{ Word = ''; Expected = '127.0.0.1', '::1', '0.0.0.0', '::' }
+        @{ Word = ':'; Expected = '::1', '::' }
+        @{ Word = '0'; Expected = , '0.0.0.0' }
+        @{ Word = "'1"; Expected = , '127.0.0.1' }
+        @{ Word = '10'; Expected = @() }
+    ) {
+        param ($Word, $Expected)
+
+        $line = "Start-ObolKdc EXAMPLE.TEST -Address $Word"
+        $actual = TabExpansion2 -inputScript $line -cursorColumn $line.Length
+
+        @($actual.CompletionMatches | ForEach-Object CompletionText) | Should-BeCollection $Expected
+        if ($Word -eq '') {
+            $actual.CompletionMatches[0].ToolTip | Should-Be 'IPv4 loopback, only reachable from this host (default)'
+        }
+    }
+
+    It "Starts multiple KDCs" {
+        $kdc1 = Start-ObolKdc EXAMPLE.TEST
+        $kdc2 = Start-ObolKdc OTHER.TEST
+
+        $kdc1.Port | Should-NotBe $kdc2.Port
+
+        $actual = Get-ObolKdc
+        $actual.Count | Should-Be 2
+        $actual[0] | Should-BeSame $kdc1
+        $actual[1] | Should-BeSame $kdc2
+    }
+
+    It "Fails when the port is in use" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $err = { Start-ObolKdc OTHER.TEST -Port $kdc.Port } |
+            Should-Throw -FullyQualifiedErrorId 'KdcBindFailed,Obol.Commands.StartObolKdc'
+        $err.ErrorDetails.Message | Should-BeLikeString "Failed to start the KDC for 'OTHER.TEST' on 127.0.0.1:$($kdc.Port): *"
+
+        (Get-ObolKdc).Count | Should-Be 1
+    }
+
+    It "Fails when the port is in use for UDP" {
+        $udp = [UdpClient]::new([IPEndPoint]::new([IPAddress]::Loopback, 0))
+        try {
+            $port = $udp.Client.LocalEndPoint.Port
+
+            { Start-ObolKdc EXAMPLE.TEST -Port $port } |
+                Should-Throw -FullyQualifiedErrorId 'KdcBindFailed,Obol.Commands.StartObolKdc'
+        }
+        finally {
+            $udp.Dispose()
+        }
+
+        Get-ObolKdc | Should-BeNull
+    }
+
+    It "Responds to an AS-REQ for an unknown principal" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user)
+
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Responds to an AS-REQ for a realm it does not serve" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq OTHER.TEST user)
+
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_WRONG_REALM
+    }
+
+    It "Handles multiple requests on one connection" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $request = New-AsReq EXAMPLE.TEST user
+
+        $client = [TcpClient]::new()
+        try {
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+            $length = [byte[]]::new(4)
+            [Buffers.Binary.BinaryPrimitives]::WriteInt32BigEndian($length, $request.Length)
+
+            foreach ($i in 1..2) {
+                $stream.Write($length, 0, 4)
+                $stream.Write($request, 0, $request.Length)
+
+                $respLength = [byte[]]::new(4)
+                $stream.ReadExactly($respLength, 0, 4)
+                $response = [byte[]]::new([Buffers.Binary.BinaryPrimitives]::ReadInt32BigEndian($respLength))
+                $stream.ReadExactly($response, 0, $response.Length)
+
+                Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+            }
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
+
+    It "Handles a TCP request split across writes" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $request = New-AsReq EXAMPLE.TEST user
+        $length = [byte[]]::new(4)
+        [Buffers.Binary.BinaryPrimitives]::WriteInt32BigEndian($length, $request.Length)
+        $half = [int]($request.Length / 2)
+
+        $client = [TcpClient]::new()
+        try {
+            $client.NoDelay = $true
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+
+            # The length prefix one byte at a time then the request in two parts.
+            foreach ($b in $length) {
+                $stream.Write([byte[]]@($b), 0, 1)
+                Start-Sleep -Milliseconds 20
+            }
+            $stream.Write($request, 0, $half)
+            Start-Sleep -Milliseconds 20
+            $stream.Write($request, $half, $request.Length - $half)
+
+            Get-KrbErrorCode (Read-TcpResponse $stream) | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
+
+    It "Handles pipelined TCP requests" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $client = [TcpClient]::new()
+        try {
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+
+            # Both requests are sent before reading, the replies come back in order.
+            Write-TcpRequest $stream (New-AsReq EXAMPLE.TEST user)
+            Write-TcpRequest $stream (New-AsReq OTHER.TEST user)
+
+            Get-KrbErrorCode (Read-TcpResponse $stream) | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+            Get-KrbErrorCode (Read-TcpResponse $stream) | Should-Be $KrbErrorCode.KDC_ERR_WRONG_REALM
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
+
+    It "Responds with an error to an empty TCP request and keeps the connection open" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $client = [TcpClient]::new()
+        try {
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+
+            Write-TcpRequest $stream ([byte[]]::new(0))
+            $actual = Get-KrbError (Read-TcpResponse $stream)
+            $actual.ErrorCode | Should-Be $KrbErrorCode.KRB_ERR_GENERIC
+            $actual.EText | Should-BeLikeString 'Failed to process request: *'
+
+            Write-TcpRequest $stream (New-AsReq EXAMPLE.TEST user)
+            Get-KrbErrorCode (Read-TcpResponse $stream) | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
+
+    It "Handles a client that disconnects mid request" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $client = [TcpClient]::new()
+        try {
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+            # Promise 100 bytes but only send 10.
+            $stream.Write([byte[]]@(0, 0, 0, 100) + [byte[]]::new(10), 0, 14)
+        }
+        finally {
+            $client.Dispose()
+        }
+
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Running)
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user)
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Responds with an error to an invalid TCP request and keeps the connection open" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $client = [TcpClient]::new()
+        try {
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+
+            foreach ($request in @(, [byte[]]@(0x6A)) + @(, (New-AsReq EXAMPLE.TEST user))) {
+                $length = [byte[]]::new(4)
+                [Buffers.Binary.BinaryPrimitives]::WriteInt32BigEndian($length, $request.Length)
+                $stream.Write($length, 0, 4)
+                $stream.Write($request, 0, $request.Length)
+
+                $stream.ReadExactly($length, 0, 4)
+                $response = [byte[]]::new([Buffers.Binary.BinaryPrimitives]::ReadInt32BigEndian($length))
+                $stream.ReadExactly($response, 0, $response.Length)
+
+                $actual = Get-KrbError $response
+                if ($request.Length -eq 1) {
+                    $actual.ErrorCode | Should-Be $KrbErrorCode.KRB_ERR_GENERIC
+                    $actual.EText | Should-BeLikeString 'Failed to process request: *'
+                }
+                else {
+                    $actual.ErrorCode | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+                }
+            }
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
+
+    It "Closes the connection on an invalid length prefix" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $client = [TcpClient]::new()
+        try {
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+            # Negative length, the reserved high bit is set.
+            $stream.Write([byte[]]@(0x80, 0, 0, 0), 0, 4)
+
+            $actual = Get-KrbError (Read-TcpResponse $stream)
+            $actual.ErrorCode | Should-Be $KrbErrorCode.KRB_ERR_FIELD_TOOLONG
+            $actual.EText | Should-Be 'Length prefix extensions are not supported'
+            $stream.Read([byte[]]::new(1), 0, 1) | Should-Be 0
+        }
+        finally {
+            $client.Dispose()
+        }
+
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Running)
+        $response = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST user)
+        Get-KrbErrorCode $response | Should-Be $KrbErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN
+    }
+
+    It "Closes the connection on a request that is too large" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $client = [TcpClient]::new()
+        try {
+            $client.Connect([IPAddress]::Loopback, $kdc.Port)
+            $stream = $client.GetStream()
+            # 1 MiB + 1, the data does not need to be sent.
+            $stream.Write([byte[]]@(0x00, 0x10, 0x00, 0x01), 0, 4)
+
+            $actual = Get-KrbError (Read-TcpResponse $stream)
+            $actual.ErrorCode | Should-Be $KrbErrorCode.KRB_ERR_FIELD_TOOLONG
+            $actual.EText | Should-Be 'Request length 1048577 exceeds the limit of 1048576 bytes'
+            $stream.Read([byte[]]::new(1), 0, 1) | Should-Be 0
+        }
+        finally {
+            $client.Dispose()
+        }
+    }
+
+    It "Stops the KDC when the runspace closes" {
+        $iss = [InitialSessionState]::CreateDefault2()
+        $iss.ImportPSModule((Get-Module Obol).Path)
+        $rs = [RunspaceFactory]::CreateRunspace($iss)
+        try {
+            $rs.Open()
+            $ps = [PowerShell]::Create($rs)
+            $kdc = $ps.AddCommand('Start-ObolKdc').AddParameter('Realm', 'EXAMPLE.TEST').Invoke()[0]
+            $ps.Dispose()
+
+            $kdc.State | Should-Be ([Obol.ObolKdcState]::Running)
+            # KDCs are tracked per runspace.
+            Get-ObolKdc | Should-BeNull
+        }
+        finally {
+            $rs.Dispose()
+        }
+
+        $kdc.State | Should-Be ([Obol.ObolKdcState]::Stopped)
+        { [TcpClient]::new('127.0.0.1', $kdc.Port) } | Should-Throw
     }
 
     It "Loads Kerberos.NET in the module load context" {
+        $null = Start-ObolKdc EXAMPLE.TEST
+
         $kerberosAsm = [AppDomain]::CurrentDomain.GetAssemblies() |
             Where-Object { $_.GetName().Name -eq 'Kerberos.NET' }
 
