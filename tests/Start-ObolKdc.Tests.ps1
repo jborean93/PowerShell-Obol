@@ -1,5 +1,8 @@
+using namespace System.IO
+using namespace System.Runtime.Loader
+
 BeforeDiscovery {
-    . ([IO.Path]::Combine($PSScriptRoot, 'common.ps1'))
+    . ([Path]::Combine($PSScriptRoot, 'common.ps1'))
 }
 
 Describe "Start-ObolKdc" {
@@ -15,6 +18,6 @@ Describe "Start-ObolKdc" {
             Where-Object { $_.GetName().Name -eq 'Kerberos.NET' }
 
         $kerberosAsm | Should-NotBeNull
-        [System.Runtime.Loader.AssemblyLoadContext]::GetLoadContext($kerberosAsm).Name | Should-Be Obol
+        [AssemblyLoadContext]::GetLoadContext($kerberosAsm).Name | Should-Be Obol
     }
 }

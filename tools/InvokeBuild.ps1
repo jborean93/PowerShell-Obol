@@ -28,7 +28,6 @@ task BuildManaged {
         "-p:Version=$($Manifest.Module.Version)"
     )
 
-    $first = $true
     $csproj = (Get-Item -Path "$($Manifest.DotnetPath)/*.csproj").FullName
     foreach ($framework in $Manifest.TargetFrameworks) {
         Write-Host "Compiling for $framework" -ForegroundColor Cyan
@@ -40,22 +39,12 @@ task BuildManaged {
             throw "Failed to compiled code for $framework"
         }
 
+        # RID specific assets stay next to Obol.deps.json so the loader's
+        # AssemblyDependencyResolver can find them. Prune RIDs PowerShell
+        # does not run on.
         $runtimesDir = [Path]::Combine($outputDir, 'runtimes')
-        if (-not (Test-Path -LiteralPath $runtimesDir)) {
-            continue
-        }
-
-        if ($first) {
-            Remove-Item ([Path]::Combine($runtimesDir, 'android*')) -Recurse -Force
-            Remove-Item ([Path]::Combine($runtimesDir, 'ios*')) -Recurse -Force
-            Remove-Item ([Path]::Combine($runtimesDir, 'osx-universal')) -Recurse -Force -ErrorAction Ignore
-            $destRuntimes = [Path]::GetFullPath([Path]::Combine(
-                    $outputDir, '..', 'runtimes'))
-            Move-Item -LiteralPath $runtimesDir -Destination $destRuntimes
-            $first = $false
-        }
-        else {
-            Remove-Item -LiteralPath $runtimesDir -Recurse -Force
+        foreach ($rid in 'android*', 'ios*', 'osx-universal') {
+            Remove-Item ([Path]::Combine($runtimesDir, $rid)) -Recurse -Force -ErrorAction Ignore
         }
     }
 }
@@ -163,10 +152,13 @@ task TestSetup {
     # cannot rely on the default in case external pdbs are found by dotnet.
     # The integration tests ignore this option as PesterTests instruments the
     # same assemblies explicitly.
+    # The Loader is ALC boilerplate and is excluded from coverage.
     $includedAssemblies = @(
-        Get-ChildItem -LiteralPath $watchFolder -Filter "*.pdb" | ForEach-Object {
-            "$wildcardBase$([regex]::Escape($_.BaseName))\.dll$"
-        }
+        Get-ChildItem -LiteralPath $watchFolder -Filter "*.pdb" |
+            Where-Object BaseName -NE "$($Manifest.Module.Name).Loader" |
+            ForEach-Object {
+                "$wildcardBase$([regex]::Escape($_.BaseName))\.dll$"
+            }
     )
 
     $config = @{
@@ -269,23 +261,25 @@ task PesterTests {
     Copy-Item -LiteralPath ([Path]::Combine($pwshHome, 'System.Management.Automation.dll')) -Destination $instrumentPath
 
     $instrumentedFiles = @(
-        Get-ChildItem -LiteralPath $watchFolder -Filter "*.pdb" | ForEach-Object {
-            $dll = "$($_.BaseName).dll"
-            $instrumentArgs = @(
-                'instrument'
-                [Path]::Combine($instrumentPath, $dll)
-                '--session-id', $sessionId
-                '--settings', $Manifest.TestSettingsPath
-                '--nologo'
-            )
-            dotnet-coverage @instrumentArgs | Out-Host
-            if ($LASTEXITCODE) {
-                throw "Failed to instrument $dll"
-            }
+        Get-ChildItem -LiteralPath $watchFolder -Filter "*.pdb" |
+            Where-Object BaseName -NE "$($Manifest.Module.Name).Loader" |
+            ForEach-Object {
+                $dll = "$($_.BaseName).dll"
+                $instrumentArgs = @(
+                    'instrument'
+                    [Path]::Combine($instrumentPath, $dll)
+                    '--session-id', $sessionId
+                    '--settings', $Manifest.TestSettingsPath
+                    '--nologo'
+                )
+                dotnet-coverage @instrumentArgs | Out-Host
+                if ($LASTEXITCODE) {
+                    throw "Failed to instrument $dll"
+                }
 
-            $dll
-            $_.Name
-        }
+                $dll
+                $_.Name
+            }
     )
 
     $arguments = @(

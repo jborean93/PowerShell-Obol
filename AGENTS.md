@@ -97,7 +97,16 @@ pwsh -NoProfile -Command {
 
 ### Test conventions
 
-- Every Pester file must start with `BeforeDiscovery { . ([IO.Path]::Combine($PSScriptRoot, 'common.ps1')) }`.
+- Every Pester file must start with
+  `BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }`,
+  preceded only by its `using namespace` statements.
+- Use `using namespace` at the top of the file for built-in .NET and
+  PowerShell namespaces (`System.IO`, `System.Management.Automation`, ...) and
+  refer to those types by their short name, such as `[Path]` instead of
+  `[System.IO.Path]`. Always write `Obol` types with their full name, such as
+  `[Obol.Commands.StartObolKdc]`. Scriptblocks run in a child `pwsh`
+  (`& $pwsh -Command { ... }`) do not inherit the file's `using` statements,
+  so use full type names inside them.
 - Assertions use the Pester 6 `Should-*` commands (`Should-Be`, `Should-Throw -ExceptionMessage`, ...). The
   classic `Should -Be` form is disabled in the test run and fails.
 - `build.ps1 -Task Test` instruments the built module for coverage. Do not
@@ -134,6 +143,54 @@ signed with Azure Trusted Signing and published to the PowerShell Gallery.
   must be deleted by hand.
 - Add a line to `CHANGELOG.md` under the unreleased heading for anything a
   user would notice.
+
+### Public type surface
+
+`Obol.dll` and its dependencies (Kerberos.NET, Pkcs, logging abstractions,
+...) live in a private `AssemblyLoadContext` created by `Obol.Loader`.
+PowerShell can resolve types in `Obol.dll` by name because the module imports
+that assembly directly (`Import-Module -Assembly`). It cannot resolve types
+from the dependencies (`[Kerberos.NET.X]` and `-as [type]` fail), and those
+types can clash with copies of the same assembly in the default context. So:
+
+- Cmdlet parameter types must be either built-in types (BCL or
+  `System.Management.Automation`) or types defined in `Obol.dll` itself.
+  Never use a dependency's type as a parameter type.
+- Never write a dependency's object directly to the pipeline or expose one
+  as a property type. Wrap it in an `Obol` type that exposes the needed data
+  through built-in or `Obol` types. The wrapper may keep the dependency object
+  internally.
+- `Obol.Loader` is shared by every runspace and stays loaded for the life of
+  the process. Only one copy of the module can be loaded per process;
+  `Obol.psm1` refuses to import a copy from a different path.
+- Dependencies are resolved from `bin/<tfm>/Obol.deps.json` with
+  `AssemblyDependencyResolver`, so keep the standard `dotnet publish` layout
+  (RID specific assets in `bin/<tfm>/runtimes/`) intact.
+
+### Bundled or PowerShell-provided dependencies
+
+The loader only loads assemblies listed in `Obol.deps.json` into the `Obol`
+context. Anything not listed falls back to the default context, which is the
+copy shipped with PowerShell or .NET. Whether a dependency is bundled is
+therefore decided at build time by the `PackageReference`:
+
+- To use PowerShell's copy, set `ExcludeAssets="runtime" PrivateAssets="all"`
+  like `System.Management.Automation`. Only do this when every supported
+  PowerShell version ships an assembly version at least as high as the one
+  compiled against.
+- To bundle a copy, use a plain `PackageReference`. Do not add
+  `PrivateAssets="all"`: the SDK treats it as `Publish="false"` and the
+  assembly is silently not published.
+- An assembly that is part of the .NET shared framework, such as
+  `System.Formats.Asn1`, is only published when the package version is
+  higher than the runtime's. Otherwise build conflict resolution drops it and
+  the runtime copy is used, whatever the `PackageReference` says.
+- A bundled copy of an assembly PowerShell also loads has different types
+  from PowerShell's copy, which is another reason for the rules in
+  [Public type surface](#public-type-surface).
+
+Check `Obol.deps.json` and `bin/<tfm>/` in the built module to confirm what
+was bundled.
 
 ## Scratch files
 

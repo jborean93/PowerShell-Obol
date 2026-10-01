@@ -8,9 +8,6 @@
     <!-- Module Deps -->
     <PackageVersion Include="Kerberos.NET" Version="4.6.168" />
     <PackageVersion Include="System.Management.Automation" Version="7.6.0" />
-
-    <!-- Build/CI -->
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
   </ItemGroup>
 
 </Project>
