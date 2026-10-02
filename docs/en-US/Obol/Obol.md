@@ -34,6 +34,14 @@ Creates a krb5.conf for Obol KDCs as a string.
 
 Converts a principal or account name to the salt its keys are derived from a password with.
 
+### [Enter-ObolKrb5Environment](Enter-ObolKrb5Environment.md)
+
+Points the krb5 environment variables of the current process at Obol KDCs.
+
+### [Exit-ObolKrb5Environment](Exit-ObolKrb5Environment.md)
+
+Restores the krb5 environment variables changed by Enter-ObolKrb5Environment.
+
 ### [Export-ObolKeytab](Export-ObolKeytab.md)
 
 Exports the keys of principals of an Obol KDC to a keytab file.

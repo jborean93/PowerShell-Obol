@@ -148,4 +148,24 @@ Describe "Heimdal" -Skip:(-not $heimdal) {
             $null = Invoke-KerberosTool { kinit -k -t $serviceKeytab HTTP/web.example.test@EXAMPLE.TEST }
         }
     }
+
+    Context "Enter-ObolKrb5Environment" {
+        AfterEach {
+            Exit-ObolKrb5Environment
+        }
+
+        It "Gets tickets with the variables it sets" {
+            $kdc = Start-ObolKdc EXAMPLE.TEST -Principal @{ user = $null; 'HTTP/web.example.test' = $null }
+            Enter-ObolKrb5Environment $kdc -ServicePrincipal ($kdc | Get-ObolPrincipal user) -Provider Heimdal
+            $ccache = $env:KRB5CCNAME
+
+            # Heimdal has no client keytab variable, kinit -k without -t uses the keytab from KRB5_KTNAME.
+            $null = Invoke-KerberosTool { kinit -k user@EXAMPLE.TEST }
+            $null = Invoke-KerberosTool { kgetcred HTTP/web.example.test@EXAMPLE.TEST }
+
+            $actual = Invoke-KerberosTool { klist -v }
+            $actual | Should-BeLikeString "*$($ccache -replace '^FILE:')*"
+            $actual | Should-BeLikeString '*Server: HTTP/web.example.test@EXAMPLE.TEST*'
+        }
+    }
 }

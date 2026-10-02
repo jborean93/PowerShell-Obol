@@ -49,7 +49,7 @@ There is no single configuration for both when a KDC listens on only one transpo
 
 A KDC that is not running or whose realm cannot be written in a krb5.conf, because it contains whitespace or one of `= [ ] { } # ; "`, writes an error and is left out.
 
-The configuration only describes the KDCs, use environment variables such as `KRB5_CONFIG` to point clients at it.
+The configuration only describes the KDCs, use environment variables such as `KRB5_CONFIG` to point clients at it, or use `Enter-ObolKrb5Environment` to write the file and set the variables in one step.
 
 ## EXAMPLES
 
@@ -240,6 +240,7 @@ The file does not include any keys or passwords.
 ## RELATED LINKS
 
 - [ConvertTo-ObolKrb5Config](./ConvertTo-ObolKrb5Config.md)
+- [Enter-ObolKrb5Environment](./Enter-ObolKrb5Environment.md)
 - [Start-ObolKdc](./Start-ObolKdc.md)
 - [Export-ObolKeytab](./Export-ObolKeytab.md)
 - [MIT krb5.conf](https://web.mit.edu/kerberos/krb5-latest/doc/admin/conf_files/krb5_conf.html)
