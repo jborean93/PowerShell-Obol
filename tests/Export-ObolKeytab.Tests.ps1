@@ -177,6 +177,15 @@ Describe "Export-ObolKeytab" {
         Get-Content $path | Should-Be 'not a keytab'
     }
 
+    It "Fails to append to a file shorter than the keytab header" {
+        [File]::WriteAllBytes($path, [byte[]]@(5))
+
+        { Export-ObolKeytab $path -Principal $user -Append } |
+            Should-Throw -FullyQualifiedErrorId 'InvalidKeytab,Obol.Commands.ExportObolKeytab'
+
+        [File]::ReadAllBytes($path) | Should-BeCollection @([byte]5)
+    }
+
     It "Fails with -Append and -Force" {
         { Export-ObolKeytab $path -Principal $user -Append -Force } |
             Should-Throw -FullyQualifiedErrorId 'AppendWithForce,Obol.Commands.ExportObolKeytab'

@@ -89,6 +89,7 @@
         'Set-ObolPrincipal'
         'Start-ObolKdc'
         'Stop-ObolKdc'
+        'Use-ObolKdc'
     )
 
     # Variables to export from this module
