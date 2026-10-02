@@ -75,6 +75,8 @@
         'ConvertTo-ObolKeytab'
         'ConvertTo-ObolKrb5Config'
         'ConvertTo-ObolSalt'
+        'Enter-ObolKrb5Environment'
+        'Exit-ObolKrb5Environment'
         'Export-ObolKeytab'
         'Export-ObolKrb5Config'
         'Get-ObolKdc'

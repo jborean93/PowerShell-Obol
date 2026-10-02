@@ -33,3 +33,5 @@ Cmdlets present with this initial release.
 
 + [ConvertTo-ObolKrb5Config](docs/en-US/Obol/ConvertTo-ObolKrb5Config.md): Creates a krb5.conf for Obol KDCs as a string.
 + [Export-ObolKrb5Config](docs/en-US/Obol/Export-ObolKrb5Config.md): Writes a krb5.conf for Obol KDCs to a file.
++ [Enter-ObolKrb5Environment](docs/en-US/Obol/Enter-ObolKrb5Environment.md): Points the krb5 environment variables of the current process at Obol KDCs.
++ [Exit-ObolKrb5Environment](docs/en-US/Obol/Exit-ObolKrb5Environment.md): Restores the krb5 environment variables changed by Enter-ObolKrb5Environment.

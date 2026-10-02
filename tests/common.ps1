@@ -143,3 +143,34 @@ Function Invoke-KerberosTool {
     $out
 }
 
+
+Function Get-NativeEnvironmentVariable {
+    <#
+    .SYNOPSIS
+    Gets a variable from the C library's environment on Linux and macOS, which .NET does not change there.
+    #>
+    param ([string]$Name)
+
+    if (-not ('ObolTests.Libc' -as [type])) {
+        $lib = if ($IsMacOS) { 'libc' } else { 'libc.so.6' }
+        Add-Type -Namespace ObolTests -Name Libc -MemberDefinition @"
+[DllImport("$lib", EntryPoint = "getenv")]
+private static extern IntPtr GetEnvPtr(string name);
+
+public static string GetEnv(string name) => Marshal.PtrToStringUTF8(GetEnvPtr(name));
+"@
+    }
+    [ObolTests.Libc]::GetEnv($Name)
+}
+
+Function New-ObolPowerShell {
+    <#
+    .SYNOPSIS
+    Creates a PowerShell instance with its own runspace in this process that has the Obol module imported.
+    #>
+    $ps = [PowerShell]::Create()
+    $null = $ps.AddCommand('Import-Module').AddArgument(
+        [Path]::Combine((Get-Module Obol).ModuleBase, 'Obol.psd1')).Invoke()
+    $ps.Commands.Clear()
+    $ps
+}

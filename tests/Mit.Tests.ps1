@@ -182,4 +182,54 @@ Describe "MIT krb5" -Skip:(-not $mitKrb5) {
                 Should-BeLikeString '*kvno = 7, keytab entry valid*'
         }
     }
+
+    Context "Enter-ObolKrb5Environment" {
+        BeforeEach {
+            $kdc = Start-ObolKdc EXAMPLE.TEST -Principal @{ user = $null; 'HTTP/web.example.test' = $null }
+            $client = $kdc | Get-ObolPrincipal user
+            $service = $kdc | Get-ObolPrincipal HTTP/*
+        }
+
+        AfterEach {
+            Exit-ObolKrb5Environment
+        }
+
+        It "Gets tickets with the variables it sets" {
+            Enter-ObolKrb5Environment $kdc -ClientPrincipal $client -ServicePrincipal $service -Provider Mit
+            $ccache = $env:KRB5CCNAME
+
+            # -i uses the client keytab from KRB5_CLIENT_KTNAME.
+            $null = Invoke-KerberosTool { kinit -k -i user@EXAMPLE.TEST }
+            $null = Invoke-KerberosTool { kvno -S HTTP web.example.test }
+
+            Invoke-KerberosTool { klist } | Should-BeLikeString "*Ticket cache: $ccache*"
+            Invoke-KerberosTool { klist -k } | Should-BeLikeString '*HTTP/web.example.test@EXAMPLE.TEST*'
+            Invoke-KerberosTool { kvno -k $env:KRB5_KTNAME HTTP/web.example.test } |
+                Should-BeLikeString '*keytab entry valid*'
+        }
+
+        It "Gets a ticket in process with -SetNativeEnvironment" {
+            Enter-ObolKrb5Environment $kdc -ClientPrincipal $client -Provider Mit -SetNativeEnvironment
+            $null = Invoke-KerberosTool { kinit -k -i user@EXAMPLE.TEST }
+
+            # .NET uses the system GSSAPI, which reads the native environment for krb5.conf and the ccache.
+            $auth = [System.Net.Security.NegotiateAuthentication]::new(
+                [System.Net.Security.NegotiateAuthenticationClientOptions]@{
+                    Package = 'Kerberos'
+                    TargetName = 'HTTP/web.example.test'
+                })
+            try {
+                $status = [System.Net.Security.NegotiateAuthenticationStatusCode]::GenericFailure
+                $token = $auth.GetOutgoingBlob([byte[]]@(), [ref]$status)
+
+                $status | Should-Be ([System.Net.Security.NegotiateAuthenticationStatusCode]::Completed)
+                $token.Length | Should-BeGreaterThan 0
+            }
+            finally {
+                $auth.Dispose()
+            }
+
+            Invoke-KerberosTool { klist } | Should-BeLikeString '*HTTP/web.example.test@EXAMPLE.TEST*'
+        }
+    }
 }
