@@ -25,7 +25,7 @@ runs a Kerberos Key Distribution Center (KDC) endpoint built on
 | `module/` | The `.psd1` manifest and `.psm1` loader script copied verbatim into the built module. `ModuleVersion` here is the single source of truth for the version. |
 | `docs/en-US/Obol/` | Microsoft.PowerShell.PlatyPS markdown help (PlatyPS always nests pages under a folder named after the module). Cmdlet pages are compiled to MAML and `about_*.md` pages are copied as `about_*.help.txt` at build time. Edit the prose here; run `tools/UpdateDocs.ps1` to sync the syntax and parameter metadata. |
 | `tests/*.Tests.ps1` | Pester tests that run against the built module. |
-| `tests/common.ps1` | Dot-sourced by every Pester file. Imports the built module. |
+| `tests/common.ps1` | Dot-sourced in the `BeforeAll` of every Pester file. Holds the helper functions shared by the test files. |
 | `tests/units/<Project>/` | .NET unit test projects (TUnit). Each directory is discovered and run automatically by the `Test` task. `Obol.Tests` runs the KDC against the Kerberos.NET client and hand-built requests. |
 | `tools/` | Scripts used by `build.ps1`. `InvokeBuild.ps1` defines the tasks; `common.ps1` holds the `Manifest` class and helpers. `UpdateDocs.ps1` regenerates the markdown help from the built module. |
 | `output/` | Git-ignored. Built module, nupkg, downloaded PowerShell versions, cached build modules, and test results all land here. Never commit or hand-edit it. |
@@ -97,9 +97,14 @@ pwsh -NoProfile -Command {
 
 ### Test conventions
 
-- Every Pester file must start with
-  `BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }`,
-  preceded only by its `using namespace` statements.
+- Every Pester file must start with `using module ../output/Obol`, then its `using namespace` statements,
+  then `BeforeAll { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }`. The `using module` statement imports the
+  built module when the file is parsed, before Pester discovers the tests, so `-TestCases` and `-Skip` values can
+  use `Obol` types and the tests run the same from `build.ps1`, `Invoke-Pester` and the VS Code Pester code lens.
+  A file with its own top-level `BeforeAll` dot-sources `common.ps1` as the first line of it, Pester allows one
+  `BeforeAll` per block.
+- Put helper functions used by more than one test file in `tests/common.ps1`. They are only available while
+  the tests run, values needed during discovery (`-TestCases`, `-Skip`) go in the file's `BeforeDiscovery`.
 - Use `using namespace` at the top of the file for built-in .NET and
   PowerShell namespaces (`System.IO`, `System.Management.Automation`, ...) and
   refer to those types by their short name, such as `[Path]` instead of
@@ -109,6 +114,9 @@ pwsh -NoProfile -Command {
   so use full type names inside them.
 - Assertions use the Pester 6 `Should-*` commands (`Should-Be`, `Should-Throw -ExceptionMessage`, ...). The
   classic `Should -Be` form is disabled in the test run and fails.
+- Tests that run a real Kerberos implementation's tools (`kinit`, `kvno`, `ktutil`, ...) go in a file per
+  implementation, `tests/Mit.Tests.ps1` and `tests/Heimdal.Tests.ps1`, skipped when the tools are not installed. Cmdlet test files
+  only test the cmdlet itself and do not depend on external tools.
 - `build.ps1 -Task Test` instruments the built module for coverage. Do not
   run it while another `pwsh` process has `output/Obol` imported.
 

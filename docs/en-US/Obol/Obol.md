@@ -18,6 +18,30 @@ PowerShell module that runs a Kerberos KDC endpoint based on Kerberos.NET.
 
 ## Obol Cmdlets
 
+### [ConvertFrom-ObolKeytab](ConvertFrom-ObolKeytab.md)
+
+Converts the bytes of a keytab to keytab entries.
+
+### [ConvertTo-ObolKeytab](ConvertTo-ObolKeytab.md)
+
+Converts the keys of principals or keytab entries to the bytes of a keytab.
+
+### [ConvertTo-ObolKrb5Config](ConvertTo-ObolKrb5Config.md)
+
+Creates a krb5.conf for Obol KDCs as a string.
+
+### [ConvertTo-ObolSalt](ConvertTo-ObolSalt.md)
+
+Converts a principal or account name to the salt its keys are derived from a password with.
+
+### [Export-ObolKeytab](Export-ObolKeytab.md)
+
+Exports the keys of principals of an Obol KDC to a keytab file.
+
+### [Export-ObolKrb5Config](Export-ObolKrb5Config.md)
+
+Writes a krb5.conf for Obol KDCs to a file.
+
 ### [Get-ObolKdc](Get-ObolKdc.md)
 
 Gets the Obol KDCs running in the current runspace.
@@ -25,6 +49,14 @@ Gets the Obol KDCs running in the current runspace.
 ### [Get-ObolPrincipal](Get-ObolPrincipal.md)
 
 Gets the principals of Obol KDCs.
+
+### [Import-ObolKeytab](Import-ObolKeytab.md)
+
+Imports the entries of keytab files.
+
+### [New-ObolKeytabEntry](New-ObolKeytabEntry.md)
+
+Creates keytab entries from a password or key.
 
 ### [New-ObolPrincipal](New-ObolPrincipal.md)
 

@@ -36,8 +36,8 @@ The principals are returned in the order they were created, starting with the `k
 ### Example 1: Get the principals of a KDC
 
 ```powershell
-PS C:\> $kdc = Start-ObolKdc -Realm EXAMPLE.TEST
-PS C:\> $kdc | Get-ObolPrincipal
+$kdc = Start-ObolKdc -Realm EXAMPLE.TEST
+$kdc | Get-ObolPrincipal
 ```
 
 Gets the principals of the KDC, including the `krbtgt/EXAMPLE.TEST` principal the KDC creates.
@@ -45,7 +45,7 @@ Gets the principals of the KDC, including the `krbtgt/EXAMPLE.TEST` principal th
 ### Example 2: Get the service principals of a KDC
 
 ```powershell
-PS C:\> $kdc | Get-ObolPrincipal HTTP/*
+$kdc | Get-ObolPrincipal HTTP/*
 ```
 
 Gets the principals of the KDC whose name starts with `HTTP/`.
@@ -53,7 +53,7 @@ Gets the principals of the KDC whose name starts with `HTTP/`.
 ### Example 3: Get every principal
 
 ```powershell
-PS C:\> Get-ObolKdc | Get-ObolPrincipal
+Get-ObolKdc | Get-ObolPrincipal
 ```
 
 Gets the principals of every KDC in the current runspace.

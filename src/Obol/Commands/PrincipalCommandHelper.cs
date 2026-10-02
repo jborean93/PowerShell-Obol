@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Management.Automation;
+using System.Security;
 using Obol.Protocol;
 
 namespace Obol.Commands;
@@ -37,6 +38,55 @@ internal static class PrincipalCommandHelper
             return null;
         }
 
+        return components;
+    }
+
+    /// <summary>Parses a principal name not tied to a KDC, the realm comes from the name or the argument.</summary>
+    /// <param name="name">The name to parse, such as <c>user@EXAMPLE.TEST</c> or <c>user</c>.</param>
+    /// <param name="realm">The realm for a name without one, must match the name's realm if both are set.</param>
+    /// <param name="nameRealm">The realm of the principal.</param>
+    /// <param name="error">The error to write if the name is invalid or has no realm.</param>
+    /// <returns>The name components or null if the name is invalid.</returns>
+    public static string[]? ParseNameWithRealm(
+        string name,
+        string? realm,
+        out string nameRealm,
+        out ErrorRecord? error)
+    {
+        nameRealm = "";
+        error = null;
+        if (!PrincipalName.TryParse(name, out string[]? components, out string? parsedRealm, out string? parseError))
+        {
+            error = new ErrorRecord(
+                new ArgumentException($"Invalid principal name '{name}': {parseError}"),
+                "InvalidPrincipalName",
+                ErrorCategory.InvalidArgument,
+                name);
+            return null;
+        }
+
+        if (parsedRealm is not null && realm is not null &&
+            !string.Equals(parsedRealm, realm, StringComparison.Ordinal))
+        {
+            error = new ErrorRecord(
+                new ArgumentException($"The principal realm '{parsedRealm}' does not match the realm '{realm}'"),
+                "PrincipalRealmMismatch",
+                ErrorCategory.InvalidArgument,
+                name);
+            return null;
+        }
+
+        if ((parsedRealm ?? realm) is not string resolved)
+        {
+            error = new ErrorRecord(
+                new ArgumentException($"The principal name '{name}' has no realm, add it after '@' or set -Realm"),
+                "RealmRequired",
+                ErrorCategory.InvalidArgument,
+                name);
+            return null;
+        }
+
+        nameRealm = resolved;
         return components;
     }
 
@@ -130,6 +180,37 @@ internal static class PrincipalCommandHelper
         }
 
         return types;
+    }
+
+    /// <summary>Checks the parameters that decide the keys of a principal can be used together.</summary>
+    /// <returns>The error to write, or null if the parameters are valid.</returns>
+    public static ErrorRecord? CheckKeyParameters(
+        SecureString? password,
+        bool newRandomKey,
+        ObolEncryptionType[]? encryptionTypes,
+        ObolKeytabEntry[]? key,
+        int? kvno,
+        string? salt)
+    {
+        (string? errorId, string? message) = (password, newRandomKey, encryptionTypes, key, kvno, salt) switch
+        {
+            (not null, true, _, _, _, _) => ("PasswordWithNewRandomKey",
+                "Password and NewRandomKey cannot be set together"),
+            ({ Length: 0 }, _, _, _, _, _) => ("EmptyPassword", "The password must not be empty"),
+            (not null, _, _, not null, _, _) => ("KeyWithPassword", "Key and Password cannot be set together"),
+            (_, true, _, not null, _, _) => ("KeyWithNewRandomKey", "Key and NewRandomKey cannot be set together"),
+            (_, _, not null, not null, _, _) => ("KeyWithEncryptionType",
+                "Key and EncryptionType cannot be set together, the keys decide the encryption types, filter the " +
+                "keytab entries to choose them"),
+            (_, _, _, _, < 0, _) => ("InvalidKvno", $"Kvno must be 0 or greater, got {kvno}"),
+            (null, _, _, null, _, not null) => ("SaltWithoutKey",
+                "Salt can only be set with Password or Key, random keys have no password to derive"),
+            _ => (null, null),
+        };
+
+        return errorId is null
+            ? null
+            : new ErrorRecord(new ArgumentException(message), errorId, ErrorCategory.InvalidArgument, null);
     }
 
     /// <summary>Finds the principals of a KDC by name or alias for the -Kdc and -Name parameters.</summary>

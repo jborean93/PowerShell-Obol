@@ -69,5 +69,37 @@
         </TableRowEntries>
       </TableControl>
     </View>
+    <View>
+      <Name>Obol.ObolKeytabEntry</Name>
+      <ViewSelectedBy>
+        <TypeName>Obol.ObolKeytabEntry</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem>
+                <PropertyName>FullName</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Kvno</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>EncryptionType</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Timestamp</PropertyName>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

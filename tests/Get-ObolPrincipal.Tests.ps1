@@ -1,7 +1,8 @@
+using module ../output/Obol
 using namespace System.IO
 using namespace System.Management.Automation
 
-BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
+BeforeAll { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
 
 Describe "Get-ObolPrincipal" {
     BeforeEach {

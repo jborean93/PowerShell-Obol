@@ -1,8 +1,9 @@
+using module ../output/Obol
 using namespace System.IO
 
-BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
-
 BeforeAll {
+    . ([Path]::Combine($PSScriptRoot, 'common.ps1'))
+
     $password = ConvertTo-SecureString -String 'Password123!' -AsPlainText -Force
 }
 
@@ -203,5 +204,144 @@ Describe "Set-ObolPrincipal" {
 
         $user.Kvno | Should-Be 1
         $user.Alias.Count | Should-Be 0
+    }
+}
+
+Describe "Set-ObolPrincipal keys" {
+    BeforeEach {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $service = $kdc | New-ObolPrincipal HTTP/web -Alias HTTP/web.example.test
+        $other = $kdc | New-ObolPrincipal HTTP/other
+        $path = [Path]::Combine($TestDrive, 'test.keytab')
+    }
+
+    AfterEach {
+        Get-ObolKdc | Stop-ObolKdc
+        Remove-Item $path -Force -ErrorAction Ignore
+    }
+
+    It "Replaces the keys and kvno with keys from a keytab" {
+        $service | Set-ObolPrincipal -NewRandomKey
+        $service | Set-ObolPrincipal -NewRandomKey
+        New-TestKeytab $path @(@{ Name = 'HTTP/web.example.test'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 17 })
+
+        $service | Set-ObolPrincipal -Key (Import-ObolKeytab $path)
+
+        $service.Kvno | Should-Be 1
+        $service.EncryptionType | Should-Be Aes128Sha1
+        $service.Salt | Should-Be EXAMPLE.TESTHTTPweb
+    }
+
+    It "Sets the keys of several principals from one keytab" {
+        New-TestKeytab $path @(
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 5; EncryptionType = 18 }
+            @{ Name = 'HTTP/other'; Realm = 'EXAMPLE.TEST'; Kvno = 7; EncryptionType = 17 }
+        )
+
+        $service, $other | Set-ObolPrincipal -Key (Import-ObolKeytab $path)
+
+        $service.Kvno | Should-Be 5
+        $other.Kvno | Should-Be 7
+    }
+
+    It "Matches the aliases set in the same call" {
+        New-TestKeytab $path @(@{ Name = 'HTTP/new'; Realm = 'EXAMPLE.TEST'; Kvno = 5; EncryptionType = 18 })
+
+        $service | Set-ObolPrincipal -Alias HTTP/new -Key (Import-ObolKeytab $path)
+
+        $service.Kvno | Should-Be 5
+        $service.Alias | Should-Be HTTP/new
+    }
+
+    It "Writes an error for a principal without entries and sets the others" {
+        New-TestKeytab $path @(@{ Name = 'HTTP/other'; Realm = 'EXAMPLE.TEST'; Kvno = 5; EncryptionType = 18 })
+
+        $service, $other | Set-ObolPrincipal -Key (Import-ObolKeytab $path) -ErrorAction SilentlyContinue -ErrorVariable err
+
+        $err.Count | Should-Be 1
+        $err[0].FullyQualifiedErrorId | Should-Be 'NoKeytabKey,Obol.Commands.SetObolPrincipal'
+        $service.Kvno | Should-Be 1
+        $other.Kvno | Should-Be 5
+    }
+
+    It "Sets a password with a salt" {
+        $password = ConvertTo-SecureString 'Password123!' -AsPlainText -Force
+
+        $service | Set-ObolPrincipal -Password $password -Salt CORP.EXAMPLEsvc_web -EncryptionType Aes256Sha1
+
+        $service.Kvno | Should-Be 2
+        $service.Salt | Should-Be CORP.EXAMPLEsvc_web
+        $kdc | Export-ObolKeytab $path HTTP/web
+        [Convert]::ToHexStringLower((Import-ObolKeytab $path)[0].Key) |
+            Should-Be 'ab8c3a5300b091e044f72526e1669fa999e4cb152042325df4f4864ffdf38e5c'
+    }
+
+    It "Sets new keys with a kvno from <Case>" -TestCases @(
+        @{ Case = 'a password'; UsePassword = $true }
+        @{ Case = 'random keys'; UsePassword = $false }
+    ) {
+        param ($UsePassword)
+
+        $params = if ($UsePassword) {
+            @{ Password = (ConvertTo-SecureString 'Password123!' -AsPlainText -Force) }
+        }
+        else {
+            @{ NewRandomKey = $true }
+        }
+
+        $service | Set-ObolPrincipal -Kvno 9 @params
+
+        $service.Kvno | Should-Be 9
+        $kdc | Export-ObolKeytab $path HTTP/web
+        (Import-ObolKeytab $path).Kvno | Select-Object -Unique | Should-Be 9
+    }
+
+    It "Changes the kvno of the existing keys" {
+        $kdc | Export-ObolKeytab $path HTTP/web
+        $before = Import-ObolKeytab $path | ForEach-Object { [Convert]::ToHexString($_.Key) }
+        Remove-Item $path
+
+        $service | Set-ObolPrincipal -Kvno 20
+
+        $service.Kvno | Should-Be 20
+        $kdc | Export-ObolKeytab $path HTTP/web
+        $after = Import-ObolKeytab $path
+        $after.Kvno | Select-Object -Unique | Should-Be 20
+        ($after | ForEach-Object { [Convert]::ToHexString($_.Key) }) | Should-BeCollection $before
+    }
+
+    It "Lowers the kvno" {
+        $service | Set-ObolPrincipal -NewRandomKey
+        $service | Set-ObolPrincipal -NewRandomKey
+
+        $service | Set-ObolPrincipal -Kvno 1
+
+        $service.Kvno | Should-Be 1
+    }
+
+    It "Uses the keys of the kvno given by -Kvno from a keytab" {
+        New-TestKeytab $path @(
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 4; EncryptionType = 17 }
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 5; EncryptionType = 18 }
+        )
+
+        $service | Set-ObolPrincipal -Key (Import-ObolKeytab $path) -Kvno 4
+
+        $service.Kvno | Should-Be 4
+        $service.EncryptionType | Should-Be Aes128Sha1
+    }
+
+    It "Fails for <Case>" -TestCases @(
+        @{ Case = 'Key with NewRandomKey'; Params = @{ Key = @(); NewRandomKey = $true }; ErrorId = 'KeyWithNewRandomKey' }
+        @{ Case = 'Key with Password'; Params = @{ Key = @(); Password = (ConvertTo-SecureString a -AsPlainText -Force) }; ErrorId = 'KeyWithPassword' }
+        @{ Case = 'Key with EncryptionType'; Params = @{ Key = @(); EncryptionType = 'Aes256Sha1' }; ErrorId = 'KeyWithEncryptionType' }
+        @{ Case = 'Salt without Password or Key'; Params = @{ Salt = 'abc' }; ErrorId = 'SaltWithoutKey' }
+        @{ Case = 'Salt with NewRandomKey'; Params = @{ Salt = 'abc'; NewRandomKey = $true }; ErrorId = 'SaltWithoutKey' }
+    ) {
+        param ($Params, $ErrorId)
+
+        { $service | Set-ObolPrincipal @Params } |
+            Should-Throw -FullyQualifiedErrorId "$ErrorId,Obol.Commands.SetObolPrincipal"
+        $service.Kvno | Should-Be 1
     }
 }

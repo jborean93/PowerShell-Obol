@@ -17,19 +17,35 @@ Creates a principal in the realm of an Obol KDC.
 
 ## SYNTAX
 
-### Parameter (Default)
-
-```
-New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> [-Password <securestring>]
- [-Flag <ObolPrincipalFlag>] [-EncryptionType <ObolEncryptionType[]>] [-Alias <string[]>]
- [-Rid <int>] [-WhatIf] [-Confirm] [<CommonParameters>]
-```
-
 ### Setting
 
 ```
 New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> -Setting <ObolPrincipalSetting> [-WhatIf]
  [-Confirm] [<CommonParameters>]
+```
+
+### Random (Default)
+
+```
+New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> [-Flag <ObolPrincipalFlag>]
+ [-EncryptionType <ObolEncryptionType[]>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [-WhatIf]
+ [-Confirm] [<CommonParameters>]
+```
+
+### Password
+
+```
+New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> -Password <securestring>
+ [-Flag <ObolPrincipalFlag>] [-EncryptionType <ObolEncryptionType[]>] [-Alias <string[]>]
+ [-Rid <int>] [-Kvno <int>] [-Salt <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
+```
+
+### Key
+
+```
+New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> -Key <ObolKeytabEntry[]>
+ [-Flag <ObolPrincipalFlag>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [-Salt <string>]
+ [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
 ## ALIASES
@@ -44,8 +60,10 @@ Use `-Password` for a principal that authenticates with a password, such as a us
 Without `-Password` the principal gets random keys, which suits a service principal.
 
 By default each principal gets AES256 and AES128 keys (`aes256-cts-hmac-sha1-96` and `aes128-cts-hmac-sha1-96`) like AD and MIT, use `-EncryptionType` for other types.
-The keys have key version number 1 and RC4 is not supported.
-Keys from a password use the default salt from RFC 4120, the realm followed by each name component, such as `EXAMPLE.TESTuser`.
+The keys have key version number 1 unless `-Kvno` is set and RC4 is not supported.
+Keys from a password use the default salt from RFC 4120, the realm followed by each name component, such as `EXAMPLE.TESTuser`, unless `-Salt` is set.
+
+Use `-Key` to give the principal the keys of an existing keytab instead, the principal gets the kvno and encryption types of those keys.
 
 A principal can have aliases, other names the KDC finds it by, like the service principal names of an AD account.
 A ticket for an alias has the alias as its service name and is encrypted with the principal's key.
@@ -60,9 +78,9 @@ The SIDs are based on the `DomainSid` of the KDC and each principal gets the nex
 ### Example 1: Create a user with a password
 
 ```powershell
-PS C:\> $kdc = Start-ObolKdc -Realm EXAMPLE.TEST
-PS C:\> $password = Read-Host -AsSecureString -Prompt Password
-PS C:\> New-ObolPrincipal -Kdc $kdc -Name user -Password $password
+$kdc = Start-ObolKdc -Realm EXAMPLE.TEST
+$password = Read-Host -AsSecureString -Prompt Password
+New-ObolPrincipal -Kdc $kdc -Name user -Password $password
 ```
 
 Creates the principal `user@EXAMPLE.TEST` that authenticates with the password entered.
@@ -70,7 +88,7 @@ Creates the principal `user@EXAMPLE.TEST` that authenticates with the password e
 ### Example 2: Create a service principal
 
 ```powershell
-PS C:\> $kdc | New-ObolPrincipal HTTP/web.example.test
+$kdc | New-ObolPrincipal HTTP/web.example.test
 ```
 
 Creates the principal `HTTP/web.example.test@EXAMPLE.TEST` with random keys.
@@ -78,7 +96,7 @@ Creates the principal `HTTP/web.example.test@EXAMPLE.TEST` with random keys.
 ### Example 3: Create a user that does not require pre-authentication
 
 ```powershell
-PS C:\> New-ObolPrincipal -Kdc $kdc -Name roast -Password $password -Flag DoesNotRequirePreAuth
+New-ObolPrincipal -Kdc $kdc -Name roast -Password $password -Flag DoesNotRequirePreAuth
 ```
 
 Creates a user the KDC issues a ticket to without pre-authentication, for example to test the detection of AS-REP roasting.
@@ -86,15 +104,33 @@ Creates a user the KDC issues a ticket to without pre-authentication, for exampl
 ### Example 4: Create a service with several names
 
 ```powershell
-PS C:\> $kdc | New-ObolPrincipal HTTP/web.example.test -Alias HTTP/web, HTTP/www.example.test
+$kdc | New-ObolPrincipal HTTP/web.example.test -Alias HTTP/web, HTTP/www.example.test
 ```
 
 Creates a service principal the KDC also issues tickets for under the names `HTTP/web` and `HTTP/www.example.test`.
 
-### Example 5: Create a service with AES SHA-2 keys only
+### Example 5: Create a service with the keys of an existing keytab
 
 ```powershell
-PS C:\> $kdc | New-ObolPrincipal HTTP/web.example.test -EncryptionType Aes256Sha384, Aes128Sha256
+$kdc | New-ObolPrincipal HTTP/web.example.test -Key (Import-ObolKeytab ./http.keytab)
+```
+
+Creates a service principal with the keys and kvno of its entries in `http.keytab`, so a service using that keytab can decrypt the tickets the KDC issues for it.
+
+### Example 6: Create a principal with the keys of an AD account
+
+```powershell
+$kdc = Start-ObolKdc -Realm CORP.EXAMPLE
+$salt = ConvertTo-ObolSalt svc_web -Realm CORP.EXAMPLE -SaltType ADUser
+$kdc | New-ObolPrincipal HTTP/web.corp.example -Password $password -Salt $salt
+```
+
+Creates a service principal with the keys the AD account `svc_web` has for the same password, so a keytab made for the account with `ktpass` works with tickets from the KDC.
+
+### Example 7: Create a service with AES SHA-2 keys only
+
+```powershell
+$kdc | New-ObolPrincipal HTTP/web.example.test -EncryptionType Aes256Sha384, Aes128Sha256
 ```
 
 Creates a service principal with only RFC 8009 keys, the service tickets and their session keys use these types.
@@ -102,7 +138,7 @@ Creates a service principal with only RFC 8009 keys, the service tickets and the
 ### Example 6: Create a principal with a specific RID
 
 ```powershell
-PS C:\> $kdc | New-ObolPrincipal Administrator -Password $password -Rid 500
+$kdc | New-ObolPrincipal Administrator -Password $password -Rid 500
 ```
 
 Creates the principal `Administrator@EXAMPLE.TEST` with the SID of the built-in Administrator account, the `DomainSid` of the KDC followed by `500`.
@@ -110,8 +146,8 @@ Creates the principal `Administrator@EXAMPLE.TEST` with the SID of the built-in 
 ### Example 7: Create a principal from settings
 
 ```powershell
-PS C:\> $setting = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth
-PS C:\> $kdc | New-ObolPrincipal roast -Setting $setting
+$setting = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth
+$kdc | New-ObolPrincipal roast -Setting $setting
 ```
 
 Creates the principal `roast@EXAMPLE.TEST` with the settings from `New-ObolPrincipalSetting`, the same settings can be used for other principals or with `Start-ObolKdc -Principal`.
@@ -133,7 +169,19 @@ DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
 ParameterSets:
-- Name: Parameter
+- Name: Random
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Password
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Key
   Position: Named
   IsRequired: false
   ValueFromPipeline: false
@@ -177,7 +225,13 @@ DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
 ParameterSets:
-- Name: Parameter
+- Name: Random
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Password
   Position: Named
   IsRequired: false
   ValueFromPipeline: false
@@ -203,7 +257,19 @@ DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
 ParameterSets:
-- Name: Parameter
+- Name: Random
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Password
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Key
   Position: Named
   IsRequired: false
   ValueFromPipeline: false
@@ -233,6 +299,66 @@ ParameterSets:
   Position: Named
   IsRequired: true
   ValueFromPipeline: true
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+DontShow: false
+AcceptedValues: []
+HelpMessage: ''
+```
+
+### -Key
+
+Keytab entries to take the principal's keys and kvno from instead of a password, as output by `Import-ObolKeytab` or `ConvertFrom-ObolKeytab`.
+Only the entries for the principal name or one of its aliases are used, entries that cannot be used write a warning.
+See [KEYS FROM A KEYTAB in about_Obol](./about_Obol.md#keys-from-a-keytab) for how the keys are chosen.
+Cannot be used with `-Password` or `-EncryptionType`, filter the entries with `Where-Object` to choose the encryption types.
+
+```yaml
+Type: Obol.ObolKeytabEntry[]
+DefaultValue: ''
+SupportsWildcards: false
+Aliases: []
+ParameterSets:
+- Name: Key
+  Position: Named
+  IsRequired: true
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+DontShow: false
+AcceptedValues: []
+HelpMessage: ''
+```
+
+### -Kvno
+
+The key version number of the principal, 1 if not set.
+Set it to the kvno an account has in another KDC, such as the `msDS-KeyVersionNumber` of an AD account, so a keytab made there for the same keys works with tickets from the KDC.
+
+With `-Key` the keys are taken from the entries with this kvno, the newest kvno of the entries if not set, see [KEYS FROM A KEYTAB in about_Obol](./about_Obol.md#keys-from-a-keytab).
+
+```yaml
+Type: System.Int32
+DefaultValue: ''
+SupportsWildcards: false
+Aliases: []
+ParameterSets:
+- Name: Random
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Password
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Key
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
   ValueFromPipelineByPropertyName: false
   ValueFromRemainingArguments: false
 DontShow: false
@@ -281,9 +407,9 @@ DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
 ParameterSets:
-- Name: Parameter
+- Name: Password
   Position: Named
-  IsRequired: false
+  IsRequired: true
   ValueFromPipeline: false
   ValueFromPipelineByPropertyName: false
   ValueFromRemainingArguments: false
@@ -306,7 +432,48 @@ DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
 ParameterSets:
-- Name: Parameter
+- Name: Random
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Password
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Key
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+DontShow: false
+AcceptedValues: []
+HelpMessage: ''
+```
+
+### -Salt
+
+The salt the keys were derived with, sent to clients that log in with the password, the RFC 4120 salt of the principal if not set.
+It only needs to be set to match keys derived somewhere else, such as an AD account, see [KEYS AND SALTS in about_Obol](./about_Obol.md#keys-and-salts) and `ConvertTo-ObolSalt`.
+Can only be used with `-Password` or `-Key`.
+
+```yaml
+Type: System.String
+DefaultValue: ''
+SupportsWildcards: false
+Aliases: []
+ParameterSets:
+- Name: Password
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+- Name: Key
   Position: Named
   IsRequired: false
   ValueFromPipeline: false
@@ -404,3 +571,4 @@ The KDC strips a suffix that matches its realm, ignoring case, and looks up the 
 - [Set-ObolPrincipal](./Set-ObolPrincipal.md)
 - [Remove-ObolPrincipal](./Remove-ObolPrincipal.md)
 - [Start-ObolKdc](./Start-ObolKdc.md)
+- [about_Obol](./about_Obol.md)

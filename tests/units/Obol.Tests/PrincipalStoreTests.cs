@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Threading.Tasks;
 using Kerberos.NET.Crypto;
 using Obol.Protocol;
@@ -278,5 +279,130 @@ public class PrincipalStoreTests
         // New keys are allowed, which makes existing TGTs invalid.
         store.Update(store.Krbtgt, newRandomKey: true);
         await Assert.That(store.Krbtgt.Kvno).IsEqualTo(2);
+    }
+
+    [Test]
+    public async Task CreatesPrincipalWithImportedKeys()
+    {
+        PrincipalStore store = CreateStore();
+        byte[] aes128 = [.. Enumerable.Range(0, 16).Select(i => (byte)i)];
+        byte[] aes256 = [.. Enumerable.Range(0, 32).Select(i => (byte)(i + 100))];
+
+        ObolPrincipal principal = store.Create(["HTTP", "web"], null, ObolPrincipalFlag.None, salt: "CUSTOMsalt",
+            importedKeys: new ImportedKeys(7,
+                [(ObolEncryptionType.Aes128Sha1, aes128), (ObolEncryptionType.Aes256Sha1, aes256)]));
+
+        await Assert.That(principal.Kvno).IsEqualTo(7);
+        await Assert.That(principal.Salt).IsEqualTo("CUSTOMsalt");
+        await Assert.That(principal.EncryptionType).IsEquivalentTo(
+            [ObolEncryptionType.Aes128Sha1, ObolEncryptionType.Aes256Sha1]);
+        await Assert.That(KeyHex(principal, EncryptionType.AES128_CTS_HMAC_SHA1_96))
+            .IsEqualTo(System.Convert.ToHexStringLower(aes128));
+        await Assert.That(principal.State.Keys.Select(k => k.Version)).IsEquivalentTo(new int?[] { 7, 7 });
+    }
+
+    [Test]
+    public async Task ImportedKeysUseDefaultSalt()
+    {
+        PrincipalStore store = CreateStore();
+
+        ObolPrincipal principal = store.Create(["HTTP", "web"], null, ObolPrincipalFlag.None,
+            importedKeys: new ImportedKeys(1, [(ObolEncryptionType.Aes128Sha1, new byte[16])]));
+
+        await Assert.That(principal.Salt).IsEqualTo("EXAMPLE.TESTHTTPweb");
+    }
+
+    [Test]
+    public async Task UpdateWithImportedKeysSetsKvno()
+    {
+        PrincipalStore store = CreateStore();
+        ObolPrincipal principal = AddService(store, "HTTP/web");
+        store.Update(principal, newRandomKey: true);
+        store.Update(principal, newRandomKey: true);
+
+        // A keytab can have an older kvno than the principal, the keys keep the keytab kvno.
+        store.Update(principal, importedKeys: new ImportedKeys(1, [(ObolEncryptionType.Aes256Sha1, new byte[32])]));
+
+        await Assert.That(principal.Kvno).IsEqualTo(1);
+        await Assert.That(principal.EncryptionType).IsEquivalentTo([ObolEncryptionType.Aes256Sha1]);
+        await Assert.That(principal.State.Keys[0].Version).IsEqualTo(1);
+    }
+
+    [Test]
+    public async Task DerivesPasswordKeysWithSalt()
+    {
+        // ktutil addent -password -s 'CORP.EXAMPLEsvc_web' -e aes256-cts-hmac-sha1-96 with 'Password123!'.
+        PrincipalStore store = CreateStore();
+
+        ObolPrincipal principal = store.Create(["HTTP", "web"], TestKdc.ToSecureString("Password123!"),
+            ObolPrincipalFlag.None, [ObolEncryptionType.Aes256Sha1], salt: "CORP.EXAMPLEsvc_web");
+
+        await Assert.That(principal.Salt).IsEqualTo("CORP.EXAMPLEsvc_web");
+        await Assert.That(KeyHex(principal, EncryptionType.AES256_CTS_HMAC_SHA1_96))
+            .IsEqualTo("ab8c3a5300b091e044f72526e1669fa999e4cb152042325df4f4864ffdf38e5c");
+    }
+
+    [Test]
+    public async Task UpdatePasswordWithSalt()
+    {
+        PrincipalStore store = CreateStore();
+        ObolPrincipal principal = AddService(store, "HTTP/web");
+
+        store.Update(principal, TestKdc.ToSecureString("Password123!"),
+            encryptionTypes: [ObolEncryptionType.Aes256Sha1], salt: "CORP.EXAMPLEsvc_web");
+
+        await Assert.That(principal.Kvno).IsEqualTo(2);
+        await Assert.That(KeyHex(principal, EncryptionType.AES256_CTS_HMAC_SHA1_96))
+            .IsEqualTo("ab8c3a5300b091e044f72526e1669fa999e4cb152042325df4f4864ffdf38e5c");
+    }
+
+    [Test]
+    public async Task CreatesPrincipalWithKvno()
+    {
+        PrincipalStore store = CreateStore();
+
+        ObolPrincipal principal = store.Create(["HTTP", "web"], TestKdc.ToSecureString("Password123!"),
+            ObolPrincipalFlag.None, kvno: 300);
+
+        await Assert.That(principal.Kvno).IsEqualTo(300);
+        await Assert.That(principal.State.Keys.Select(k => k.Version)).IsEquivalentTo(new int?[] { 300, 300 });
+    }
+
+    [Test]
+    public async Task UpdateNewKeysWithKvno()
+    {
+        PrincipalStore store = CreateStore();
+        ObolPrincipal principal = AddService(store, "HTTP/web");
+
+        store.Update(principal, newRandomKey: true, kvno: 9);
+
+        await Assert.That(principal.Kvno).IsEqualTo(9);
+        await Assert.That(principal.State.Keys.Select(k => k.Version)).IsEquivalentTo(new int?[] { 9, 9 });
+    }
+
+    [Test]
+    public async Task UpdateKvnoKeepsKeys()
+    {
+        PrincipalStore store = CreateStore();
+        ObolPrincipal principal = AddService(store, "HTTP/web");
+        string before = KeyHex(principal, EncryptionType.AES256_CTS_HMAC_SHA1_96);
+
+        store.Update(principal, kvno: 20);
+
+        await Assert.That(principal.Kvno).IsEqualTo(20);
+        await Assert.That(principal.State.Keys.Select(k => k.Version)).IsEquivalentTo(new int?[] { 20, 20 });
+        await Assert.That(KeyHex(principal, EncryptionType.AES256_CTS_HMAC_SHA1_96)).IsEqualTo(before);
+    }
+
+    [Test]
+    public async Task UpdateSameKvnoKeepsState()
+    {
+        PrincipalStore store = CreateStore();
+        ObolPrincipal principal = AddService(store, "HTTP/web");
+        PrincipalState before = principal.State;
+
+        store.Update(principal, kvno: 1);
+
+        await Assert.That(principal.State.Keys).IsEquivalentTo(before.Keys);
     }
 }

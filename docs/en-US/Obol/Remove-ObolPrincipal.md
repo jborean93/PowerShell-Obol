@@ -46,7 +46,7 @@ The `krbtgt` principal cannot be removed.
 ### Example 1: Remove a principal
 
 ```powershell
-PS C:\> $kdc | Remove-ObolPrincipal user
+$kdc | Remove-ObolPrincipal user
 ```
 
 Removes the principal `user` of the KDC.
@@ -54,7 +54,7 @@ Removes the principal `user` of the KDC.
 ### Example 2: Remove principals from Get-ObolPrincipal
 
 ```powershell
-PS C:\> $kdc | Get-ObolPrincipal HTTP/* | Remove-ObolPrincipal
+$kdc | Get-ObolPrincipal HTTP/* | Remove-ObolPrincipal
 ```
 
 Removes every principal of the KDC whose name or alias starts with `HTTP/`.

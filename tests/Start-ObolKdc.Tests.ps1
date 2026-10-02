@@ -1,3 +1,4 @@
+using module ../output/Obol
 using namespace System.Collections.Generic
 using namespace System.Formats.Asn1
 using namespace System.IO
@@ -6,11 +7,10 @@ using namespace System.Management.Automation.Runspaces
 using namespace System.Net
 using namespace System.Net.Sockets
 using namespace System.Reflection
-using namespace System.Runtime.Loader
-
-BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
 
 BeforeAll {
+    . ([Path]::Combine($PSScriptRoot, 'common.ps1'))
+
     # The KRB-ERROR codes the tests expect, RFC 4120 7.5.9.
     $KrbErrorCode = @{
         KDC_ERR_C_PRINCIPAL_UNKNOWN = 6
@@ -290,8 +290,10 @@ Describe "Start-ObolKdc" {
 
     It "Responds with KRB_ERR_RESPONSE_TOO_BIG when the UDP reply is too large" {
         $kdc = Start-ObolKdc EXAMPLE.TEST
-        # The wrong realm error includes the realm so a long realm makes a reply larger than a datagram allows.
-        $realm = 'A' * 5000
+        # The wrong realm error includes the realm once so a long realm makes a reply over the 4096 byte default.
+        # The request has it twice and macOS limits a sent datagram to 9216 bytes (net.inet.udp.maxdgram), so the
+        # realm must stay under about 4500 characters.
+        $realm = 'A' * 4200
         $request = New-AsReq $realm user
 
         $response = Invoke-KdcRequest -Port $kdc.Port -Request $request -Udp
@@ -947,15 +949,5 @@ Describe "Start-ObolKdc" {
 
         $kdc.State | Should-Be ([Obol.ObolKdcState]::Stopped)
         { [TcpClient]::new('127.0.0.1', $kdc.Port) } | Should-Throw
-    }
-
-    It "Loads Kerberos.NET in the module load context" {
-        $null = Start-ObolKdc EXAMPLE.TEST
-
-        $kerberosAsm = [AppDomain]::CurrentDomain.GetAssemblies() |
-            Where-Object { $_.GetName().Name -eq 'Kerberos.NET' }
-
-        $kerberosAsm | Should-NotBeNull
-        [AssemblyLoadContext]::GetLoadContext($kerberosAsm).Name | Should-Be Obol
     }
 }

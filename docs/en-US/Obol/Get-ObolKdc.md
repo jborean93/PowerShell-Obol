@@ -36,7 +36,7 @@ Use the `Realm` and `Port` parameters to filter the KDCs returned.
 ### Example 1: Get all running KDCs
 
 ```powershell
-PS C:\> Get-ObolKdc
+Get-ObolKdc
 ```
 
 Gets every KDC running in the current runspace.
@@ -44,7 +44,7 @@ Gets every KDC running in the current runspace.
 ### Example 2: Get the KDCs for a realm
 
 ```powershell
-PS C:\> Get-ObolKdc -Realm *.TEST
+Get-ObolKdc -Realm *.TEST
 ```
 
 Gets the KDCs whose realm ends with `.TEST`.
@@ -52,7 +52,7 @@ Gets the KDCs whose realm ends with `.TEST`.
 ### Example 3: Stop all KDCs
 
 ```powershell
-PS C:\> Get-ObolKdc | Stop-ObolKdc
+Get-ObolKdc | Stop-ObolKdc
 ```
 
 Stops every KDC running in the current runspace.

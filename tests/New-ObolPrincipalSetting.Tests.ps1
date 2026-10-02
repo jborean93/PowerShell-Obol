@@ -1,6 +1,7 @@
+using module ../output/Obol
 using namespace System.IO
 
-BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
+BeforeAll { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
 
 Describe "New-ObolPrincipalSetting" {
     It "Creates a setting with the defaults" {
@@ -12,6 +13,68 @@ Describe "New-ObolPrincipalSetting" {
         $actual.EncryptionType | Should-BeNull
         $actual.Alias | Should-BeNull
         $actual.Rid | Should-BeNull
+        $actual.Key | Should-BeNull
+        $actual.Kvno | Should-BeNull
+        $actual.Salt | Should-BeNull
+    }
+
+    It "Creates a setting with keys from a keytab" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        try {
+            $path = [Path]::Combine($TestDrive, 'setting.keytab')
+            $kdc | New-ObolPrincipal HTTP/web | Set-ObolPrincipal -NewRandomKey
+            $kdc | Export-ObolKeytab $path HTTP/web -Force
+            $entries = Import-ObolKeytab $path
+
+            $actual = New-ObolPrincipalSetting -Key $entries -Kvno 2 -Salt CUSTOM
+
+            $actual.Key | Should-BeCollection $entries
+            $actual.Kvno | Should-Be 2
+            $actual.Salt | Should-Be CUSTOM
+
+            $other = Start-ObolKdc EXAMPLE.TEST -Principal @{ 'HTTP/web' = $actual }
+            $principal = $other | Get-ObolPrincipal HTTP/web
+            $principal.Kvno | Should-Be 2
+            $principal.Salt | Should-Be CUSTOM
+        }
+        finally {
+            Get-ObolKdc | Stop-ObolKdc
+        }
+    }
+
+    It "Creates a principal with the kvno of a setting" {
+        try {
+            $setting = New-ObolPrincipalSetting -Kvno 12
+
+            $kdc = Start-ObolKdc EXAMPLE.TEST -Principal @{ 'HTTP/web' = $setting }
+
+            ($kdc | Get-ObolPrincipal HTTP/web).Kvno | Should-Be 12
+        }
+        finally {
+            Get-ObolKdc | Stop-ObolKdc
+        }
+    }
+
+    It "Does not bind <Case>" -TestCases @(
+        @{ Case = 'Key with Password'; Params = @{ Password = (ConvertTo-SecureString a -AsPlainText -Force) } }
+        @{ Case = 'Key with EncryptionType'; Params = @{ EncryptionType = 'Aes256Sha1' } }
+    ) {
+        param ($Params)
+
+        $entry = New-ObolKeytabEntry HTTP/web@EXAMPLE.TEST -Key ([byte[]]::new(32)) -EncryptionType Aes256Sha1
+
+        { New-ObolPrincipalSetting -Key $entry @Params } |
+            Should-Throw -FullyQualifiedErrorId 'AmbiguousParameterSet,Obol.Commands.NewObolPrincipalSetting'
+    }
+
+    It "Does not bind Salt without Password or Key" {
+        { New-ObolPrincipalSetting -Salt abc } |
+            Should-Throw -FullyQualifiedErrorId 'AmbiguousParameterSet,Obol.Commands.NewObolPrincipalSetting'
+    }
+
+    It "Fails with a negative kvno" {
+        { New-ObolPrincipalSetting -Kvno -1 } |
+            Should-Throw -FullyQualifiedErrorId 'ParameterArgumentValidationError,Obol.Commands.NewObolPrincipalSetting'
     }
 
     It "Creates a setting with every value" {

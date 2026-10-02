@@ -1,6 +1,7 @@
+using module ../output/Obol
 using namespace System.IO
 
-BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
+BeforeAll { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
 
 Describe "Remove-ObolPrincipal" {
     BeforeEach {

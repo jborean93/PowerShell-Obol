@@ -1,8 +1,9 @@
+using module ../output/Obol
 using namespace System.IO
 
-BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
-
 BeforeAll {
+    . ([Path]::Combine($PSScriptRoot, 'common.ps1'))
+
     $password = ConvertTo-SecureString -String 'Password123!' -AsPlainText -Force
 }
 
@@ -330,5 +331,268 @@ Describe "New-ObolPrincipal" {
         $actual.Count | Should-Be 2
         $actual[0].FullName | Should-Be HTTP/web.example.test@EXAMPLE.TEST
         $actual[1].FullName | Should-Be HTTP/web.example.test@OTHER.TEST
+    }
+}
+
+Describe "New-ObolPrincipal keys" {
+    BeforeAll {
+        Function Get-Key([byte]$Value, [int]$Length = 32) {
+            , [byte[]]([Linq.Enumerable]::Repeat($Value, $Length))
+        }
+    }
+
+    BeforeEach {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+        $path = [Path]::Combine($TestDrive, 'test.keytab')
+    }
+
+    AfterEach {
+        Get-ObolKdc | Stop-ObolKdc
+        Remove-Item $path -Force -ErrorAction Ignore
+    }
+
+    It "Creates a principal with the keys and kvno of a keytab" {
+        $source = Start-ObolKdc EXAMPLE.TEST
+        $original = $source | New-ObolPrincipal HTTP/web -EncryptionType Aes128Sha1, Aes256Sha384
+        $original | Set-ObolPrincipal -NewRandomKey
+        $source | Export-ObolKeytab $path HTTP/web
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path)
+
+        $actual.Kvno | Should-Be 2
+        $actual.EncryptionType | Should-BeCollection Aes128Sha1, Aes256Sha384
+        $actual.Salt | Should-Be EXAMPLE.TESTHTTPweb
+        $exported = [Path]::Combine($TestDrive, 'exported.keytab')
+        $kdc | Export-ObolKeytab $exported HTTP/web
+        (Import-ObolKeytab $exported | ForEach-Object { [Convert]::ToHexString($_.Key) }) |
+            Should-BeCollection (Import-ObolKeytab $path | ForEach-Object { [Convert]::ToHexString($_.Key) })
+    }
+
+    It "Uses the entries for an alias and ignores other principals and realms" {
+        New-TestKeytab $path @(
+            @{ Name = 'HTTP/other'; Realm = 'EXAMPLE.TEST'; Kvno = 9; EncryptionType = 18; Key = (Get-Key 1) }
+            @{ Name = 'HTTP/web'; Realm = 'OTHER.TEST'; Kvno = 9; EncryptionType = 18; Key = (Get-Key 2) }
+            @{ Name = 'HTTP/web.example.test'; Realm = 'EXAMPLE.TEST'; Kvno = 3; EncryptionType = 18; Key = (Get-Key 3) }
+        )
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Alias HTTP/web.example.test -Key (Import-ObolKeytab $path) -WarningVariable warn
+
+        $warn.Count | Should-Be 0
+        $actual.Kvno | Should-Be 3
+        $actual.EncryptionType | Should-Be Aes256Sha1
+        $kdc | Export-ObolKeytab ([Path]::Combine($TestDrive, 'out.keytab')) HTTP/web
+        [Convert]::ToHexString((Import-ObolKeytab ([Path]::Combine($TestDrive, 'out.keytab')))[0].Key) |
+            Should-Be ([Convert]::ToHexString((Get-Key 3)))
+    }
+
+    It "Matches names case insensitively on a case insensitive KDC" {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -CaseInsensitivePrincipal
+        New-TestKeytab $path @(@{ Name = 'http/WEB'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 })
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path)
+
+        $actual.EncryptionType | Should-Be Aes256Sha1
+    }
+
+    It "Warns for entries that cannot be used" {
+        New-TestKeytab $path @(
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 2; EncryptionType = 23; Key = (Get-Key 1 16) }
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 2; EncryptionType = 18; Key = (Get-Key 1 16) }
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 2; EncryptionType = 17; Key = (Get-Key 1 16) }
+        )
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path) -WarningAction SilentlyContinue -WarningVariable warn
+
+        $warn.Count | Should-Be 2
+        [string]$warn[0] | Should-Be 'Ignoring the keytab entry for HTTP/web@EXAMPLE.TEST with kvno 2, encryption type 23 is not supported'
+        [string]$warn[1] | Should-Be 'Ignoring the keytab entry for HTTP/web@EXAMPLE.TEST with kvno 2, the Aes256Sha1 key is 16 bytes but should be 32'
+        $actual.EncryptionType | Should-Be Aes128Sha1
+    }
+
+    It "Uses the newest kvno and warns for types only in older keys" {
+        New-TestKeytab $path @(
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 17 }
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18; Key = (Get-Key 1) }
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 2; EncryptionType = 18; Key = (Get-Key 2) }
+        )
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path) -WarningAction SilentlyContinue -WarningVariable warn
+
+        $actual.Kvno | Should-Be 2
+        $actual.EncryptionType | Should-Be Aes256Sha1
+        $warn.Count | Should-Be 1
+        [string]$warn[0] | Should-Be 'Ignoring the Aes128Sha1 key of HTTP/web@EXAMPLE.TEST with kvno 1, the newest keys with kvno 2 have no Aes128Sha1 key'
+    }
+
+    It "Uses the keys of the kvno given by -Kvno" {
+        New-TestKeytab $path @(
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 17 }
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 }
+            @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 2; EncryptionType = 18 }
+        )
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path) -Kvno 1 -WarningVariable warn
+
+        $warn.Count | Should-Be 0
+        $actual.Kvno | Should-Be 1
+        $actual.EncryptionType | Should-BeCollection Aes128Sha1, Aes256Sha1
+    }
+
+    It "Fails for <Case>" -TestCases @(
+        @{
+            Case = 'no matching entries'
+            Entry = @(@{ Name = 'HTTP/other'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 })
+            Kvno = $null
+            ErrorId = 'NoKeytabKey'
+            Message = 'No usable keys for HTTP/web@EXAMPLE.TEST were found in the keytab entries*'
+        }
+        @{
+            Case = 'only unsupported entries'
+            Entry = @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 23; Key = [byte[]]::new(16) })
+            Kvno = $null
+            ErrorId = 'NoKeytabKey'
+            Message = 'No usable keys*'
+        }
+        @{
+            Case = 'a kvno that does not exist'
+            Entry = @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 })
+            Kvno = 5
+            ErrorId = 'KeytabKvnoNotFound'
+            Message = '*with kvno 5 were found*the usable kvnos are 1'
+        }
+        @{
+            Case = 'different keys for the same type and kvno'
+            Entry = @(
+                @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 }
+                @{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18; Key = [byte[]](@(1) + @(0) * 31) }
+            )
+            Kvno = $null
+            ErrorId = 'KeytabKeyConflict'
+            Message = 'The keytab entries have different Aes256Sha1 keys with kvno 1*'
+        }
+    ) {
+        param ($Entry, $Kvno, $ErrorId, $Message)
+
+        New-TestKeytab $path $Entry
+        $params = if ($null -ne $Kvno) { @{ Kvno = $Kvno } } else { @{} }
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path) @params -WarningAction SilentlyContinue -ErrorAction SilentlyContinue -ErrorVariable err
+
+        $actual | Should-BeNull
+        $err.Count | Should-Be 1
+        $err[0].FullyQualifiedErrorId | Should-Be "$ErrorId,Obol.Commands.NewObolPrincipal"
+        [string]$err[0] | Should-BeLikeString $Message
+        $kdc | Get-ObolPrincipal HTTP/web | Should-BeNull
+    }
+
+    It "Does not bind <Case>" -TestCases @(
+        @{ Case = 'Key with Password'; Params = @{ Password = (ConvertTo-SecureString a -AsPlainText -Force) }; UseKey = $true }
+        @{ Case = 'Key with EncryptionType'; Params = @{ EncryptionType = 'Aes256Sha1' }; UseKey = $true }
+        @{ Case = 'Salt without Password or Key'; Params = @{ Salt = 'abc' }; UseKey = $false }
+    ) {
+        param ($Params, $UseKey)
+
+        if ($UseKey) {
+            New-TestKeytab $path @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 })
+            $Params.Key = Import-ObolKeytab $path
+        }
+
+        { $kdc | New-ObolPrincipal HTTP/web @Params } |
+            Should-Throw -FullyQualifiedErrorId 'AmbiguousParameterSet,Obol.Commands.NewObolPrincipal'
+        $kdc | Get-ObolPrincipal HTTP/web | Should-BeNull
+    }
+
+    It "Fails for a setting with <Case>" -TestCases @(
+        @{ Case = 'Key and Password'; Setting = @{ Password = (ConvertTo-SecureString a -AsPlainText -Force) }; UseKey = $true; ErrorId = 'KeyWithPassword' }
+        @{ Case = 'Key and EncryptionType'; Setting = @{ EncryptionType = 'Aes256Sha1' }; UseKey = $true; ErrorId = 'KeyWithEncryptionType' }
+        @{ Case = 'Salt without Password or Key'; Setting = @{ Salt = 'abc' }; UseKey = $false; ErrorId = 'SaltWithoutKey' }
+    ) {
+        param ($Setting, $UseKey, $ErrorId)
+
+        # A setting cast from a hashtable skips parameter binding so the cmdlet checks the combination itself.
+        if ($UseKey) {
+            New-TestKeytab $path @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 })
+            $Setting.Key = Import-ObolKeytab $path
+        }
+
+        $kdc | New-ObolPrincipal HTTP/web -Setting ([Obol.ObolPrincipalSetting]$Setting) -ErrorAction SilentlyContinue -ErrorVariable err
+
+        $err[0].FullyQualifiedErrorId | Should-Be "$ErrorId,Obol.Commands.NewObolPrincipal"
+        $kdc | Get-ObolPrincipal HTTP/web | Should-BeNull
+    }
+
+    It "Creates a principal with a kvno and <Case>" -TestCases @(
+        @{ Case = 'a password'; UsePassword = $true }
+        @{ Case = 'random keys'; UsePassword = $false }
+    ) {
+        param ($UsePassword)
+
+        $params = if ($UsePassword) { @{ Password = $password } } else { @{} }
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Kvno 300 @params
+
+        $actual.Kvno | Should-Be 300
+        $kdc | Export-ObolKeytab $path HTTP/web
+        (Import-ObolKeytab $path).Kvno | Should-BeCollection 300, 300
+    }
+
+    It "Creates a principal with the keys of a password and an AD account kvno" {
+        $salt = ConvertTo-ObolSalt svc_web -Realm CORP.EXAMPLE -SaltType ADUser
+        $expected = New-ObolKeytabEntry HTTP/web@EXAMPLE.TEST -Password $password -Salt $salt -Kvno 7
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Password $password -Salt $salt -Kvno 7
+
+        $actual.Kvno | Should-Be 7
+        $kdc | Export-ObolKeytab $path HTTP/web
+        (Import-ObolKeytab $path | ForEach-Object { "$($_.Kvno) $([Convert]::ToHexString($_.Key))" }) |
+            Should-BeCollection ($expected | ForEach-Object { "$($_.Kvno) $([Convert]::ToHexString($_.Key))" })
+    }
+
+    It "Derives the keys from a password with a salt" {
+        $salt = ConvertTo-ObolSalt svc_web -Realm corp.example -SaltType ADUser
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Password $password -Salt $salt -EncryptionType Aes256Sha1
+
+        $actual.Salt | Should-Be CORP.EXAMPLEsvc_web
+        $kdc | Export-ObolKeytab $path HTTP/web
+        # The key MIT ktutil derives for 'Password123!' with this salt.
+        [Convert]::ToHexStringLower((Import-ObolKeytab $path).Key) |
+            Should-Be 'ab8c3a5300b091e044f72526e1669fa999e4cb152042325df4f4864ffdf38e5c'
+    }
+
+    It "Sets the salt of keys from a keytab" {
+        New-TestKeytab $path @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 1; EncryptionType = 18 })
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path) -Salt CUSTOM
+
+        $actual.Salt | Should-Be CUSTOM
+    }
+
+    It "Creates a principal with keys from a setting" {
+        New-TestKeytab $path @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 4; EncryptionType = 17 })
+        $setting = [Obol.ObolPrincipalSetting]@{ Key = Import-ObolKeytab $path; Salt = 'CUSTOM' }
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Setting $setting
+
+        $actual.Kvno | Should-Be 4
+        $actual.Salt | Should-Be CUSTOM
+    }
+
+    It "Fails for a negative Kvno in a setting" {
+        New-TestKeytab $path @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 4; EncryptionType = 17 })
+        $setting = [Obol.ObolPrincipalSetting]@{ Key = Import-ObolKeytab $path; Kvno = -1 }
+
+        $kdc | New-ObolPrincipal HTTP/web -Setting $setting -ErrorAction SilentlyContinue -ErrorVariable err
+
+        $err[0].FullyQualifiedErrorId | Should-Be 'InvalidKvno,Obol.Commands.NewObolPrincipal'
+    }
+
+    It "Ignores null entries in a setting" {
+        New-TestKeytab $path @(@{ Name = 'HTTP/web'; Realm = 'EXAMPLE.TEST'; Kvno = 4; EncryptionType = 17 })
+        $setting = [Obol.ObolPrincipalSetting]@{ Key = @($null; Import-ObolKeytab $path) }
+
+        $actual = $kdc | New-ObolPrincipal HTTP/web -Setting $setting
+
+        $actual.Kvno | Should-Be 4
     }
 }
