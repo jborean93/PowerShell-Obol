@@ -127,25 +127,45 @@ internal sealed class PrincipalStore
         }
     }
 
-    /// <summary>Creates a principal with keys derived from a password or random keys if no password is set.</summary>
+    /// <summary>
+    /// Creates a principal with keys derived from a password, existing keys, or random keys if neither is set.
+    /// </summary>
     /// <param name="components">The name components of the principal.</param>
     /// <param name="password">The password to derive the keys from, or null to create random keys.</param>
     /// <param name="flags">The options of the principal.</param>
     /// <param name="encryptionTypes">The encryption types to create keys for, null for the defaults.</param>
     /// <param name="aliases">The name components of other names the principal can be found by.</param>
     /// <param name="rid">The RID of the principal, the next unused RID from 1000 if not set.</param>
+    /// <param name="salt">The salt of the password or existing keys, the default salt of the name if not set.</param>
+    /// <param name="importedKeys">Existing keys to use instead of a password.</param>
+    /// <param name="kvno">The key version number, the kvno of the imported keys or 1 if not set.</param>
     public ObolPrincipal Create(
         string[] components,
         SecureString? password,
         ObolPrincipalFlag flags,
         ObolEncryptionType[]? encryptionTypes = null,
         string[][]? aliases = null,
-        uint? rid = null)
+        uint? rid = null,
+        string? salt = null,
+        ImportedKeys? importedKeys = null,
+        int? kvno = null)
     {
         EncryptionType[] etypes = ToEncryptionTypes(encryptionTypes) ?? DefaultEncryptionTypes;
-        KerberosKey[] keys = password is null
-            ? CreateRandomKeys(etypes, 1)
-            : CreatePasswordKeys(password, GetSalt(components), etypes, 1);
+        string keySalt = salt ?? GetSalt(components);
+        int keyKvno = kvno ?? importedKeys?.Kvno ?? 1;
+        KerberosKey[] keys;
+        if (importedKeys is not null)
+        {
+            keys = CreateImportedKeys(importedKeys, keySalt, keyKvno);
+        }
+        else if (password is not null)
+        {
+            keys = CreatePasswordKeys(password, keySalt, etypes, keyKvno);
+        }
+        else
+        {
+            keys = CreateRandomKeys(etypes, keyKvno);
+        }
         string[] aliasNames = aliases?.Select(PrincipalName.Unparse).ToArray() ?? [];
 
         lock (_names)
@@ -173,7 +193,7 @@ internal sealed class PrincipalStore
                 principalRid = _nextRid++;
             }
 
-            return Add(components, new PrincipalState(keys, 1, flags, aliasNames), principalRid);
+            return Add(components, new PrincipalState(keys, keyKvno, flags, aliasNames), principalRid);
         }
     }
 
@@ -187,24 +207,38 @@ internal sealed class PrincipalStore
     /// </param>
     /// <param name="flags">The options to replace the existing options with.</param>
     /// <param name="aliases">The aliases to replace the existing aliases with.</param>
+    /// <param name="salt">The salt of the password or existing keys, the default salt of the name if not set.</param>
+    /// <param name="importedKeys">Existing keys to replace the keys with, they keep their kvno.</param>
+    /// <param name="kvno">
+    /// The key version number. New keys get the current kvno plus one, or the kvno of imported keys, if not set.
+    /// Without new keys the existing keys are given this kvno, like MIT kadmin modprinc -kvno.
+    /// </param>
     public void Update(
         ObolPrincipal principal,
         SecureString? password = null,
         bool newRandomKey = false,
         ObolEncryptionType[]? encryptionTypes = null,
         ObolPrincipalFlag? flags = null,
-        string[][]? aliases = null)
+        string[][]? aliases = null,
+        string? salt = null,
+        ImportedKeys? importedKeys = null,
+        int? kvno = null)
     {
         // Derive the keys outside the lock, the iterations take a while. The kvno is set under the lock as another
         // update may finish while the keys are derived.
         PrincipalState current = principal.State;
         EncryptionType[] etypes = ToEncryptionTypes(encryptionTypes) ?? [.. current.Keys.Select(k => k.EncryptionType)];
+        string keySalt = salt ?? GetSalt(principal.Components);
         KerberosKey[]? newKeys = null;
-        if (password is not null || newRandomKey)
+        if (importedKeys is not null)
+        {
+            newKeys = CreateImportedKeys(importedKeys, keySalt, importedKeys.Kvno);
+        }
+        else if (password is not null || newRandomKey)
         {
             newKeys = password is null
                 ? CreateRandomKeys(etypes, 0)
-                : CreatePasswordKeys(password, GetSalt(principal.Components), etypes, 0);
+                : CreatePasswordKeys(password, keySalt, etypes, 0);
         }
 
         lock (_names)
@@ -217,20 +251,18 @@ internal sealed class PrincipalStore
 
             // Base the change on the latest values in case another update happened while the keys were derived.
             current = principal.State;
-            int kvno = current.Kvno;
-            KerberosKey[] keys;
-            if (newKeys is null)
+            // Imported keys keep the kvno they were issued with so tickets match the service's keytab.
+            int newKvno = newKeys is null
+                ? kvno ?? current.Kvno
+                : kvno ?? importedKeys?.Kvno ?? current.Kvno + 1;
+            KerberosKey[] keys = newKeys ?? SelectExistingKeys(principal, current, etypes);
+            if (newKeys is not null || newKvno != current.Kvno)
             {
-                keys = SelectExistingKeys(principal, current, etypes);
-            }
-            else
-            {
-                kvno++;
-                keys = [.. newKeys.Select(k => new KerberosKey(
+                keys = [.. keys.Select(k => new KerberosKey(
                     key: k.GetKey().ToArray(),
                     salt: k.Salt,
                     etype: k.EncryptionType,
-                    kvno: kvno))];
+                    kvno: newKvno))];
             }
 
             string[] aliasNames = current.Aliases;
@@ -257,7 +289,7 @@ internal sealed class PrincipalStore
 
             principal.State = new PrincipalState(
                 keys,
-                kvno,
+                newKvno,
                 flags ?? current.Flags,
                 aliasNames);
         }
@@ -362,8 +394,33 @@ internal sealed class PrincipalStore
         return keys;
     }
 
+    private static KerberosKey[] CreateImportedKeys(ImportedKeys importedKeys, string salt, int kvno)
+    {
+        return [.. importedKeys.Keys.Select(k => new KerberosKey(
+            key: k.Value.ToArray(),
+            salt: salt,
+            etype: (EncryptionType)k.Type,
+            kvno: kvno))];
+    }
+
+    /// <summary>Derives the key of each encryption type from a password, RFC 3962 and RFC 8009 string-to-key.</summary>
+    /// <param name="password">The password to derive the keys from.</param>
+    /// <param name="salt">The salt to derive the keys with.</param>
+    /// <param name="etypes">The encryption types to derive a key for.</param>
+    /// <returns>The key values in the order of the encryption types.</returns>
+    public static byte[][] DeriveKeys(SecureString password, string salt, ObolEncryptionType[] etypes)
+    {
+        return [.. CreatePasswordKeys(password, salt, ToEncryptionTypes(etypes)!, 0).Select(k => k.GetKey().ToArray())];
+    }
+
+    /// <summary>The default salt from RFC 4120 4. of a principal in a realm.</summary>
+    public static string GetDefaultSalt(string realm, string[] components) => realm + string.Concat(components);
+
+    /// <summary>The size in bytes of a key of the encryption type.</summary>
+    public static int GetKeySize(ObolEncryptionType etype) => GetKeySize((EncryptionType)etype);
+
     /// <summary>The default salt from RFC 4120 4., the realm followed by each name component.</summary>
-    private string GetSalt(string[] components) => Realm + string.Concat(components);
+    private string GetSalt(string[] components) => GetDefaultSalt(Realm, components);
 
     private static KerberosKey[] CreateRandomKeys(EncryptionType[] etypes, int kvno)
     {

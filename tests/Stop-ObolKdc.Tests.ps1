@@ -1,8 +1,9 @@
+using module ../output/Obol
 using namespace System.IO
 using namespace System.Net
 using namespace System.Net.Sockets
 
-BeforeDiscovery { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
+BeforeAll { . ([Path]::Combine($PSScriptRoot, 'common.ps1')) }
 
 Describe "Stop-ObolKdc" {
     AfterEach {

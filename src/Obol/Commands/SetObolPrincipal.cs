@@ -1,5 +1,5 @@
-using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Management.Automation;
 using System.Security;
 using Obol.Protocol;
@@ -62,26 +62,26 @@ public sealed class SetObolPrincipal : PSCmdlet
     public string[]? Alias { get; set; }
 
     [Parameter]
+    [ValidateNotNull]
+    public ObolKeytabEntry[]? Key { get; set; }
+
+    [Parameter]
+    [ValidateRange(0, int.MaxValue)]
+    public int? Kvno { get; set; }
+
+    [Parameter]
+    [ValidateNotNull]
+    public string? Salt { get; set; }
+
+    [Parameter]
     public SwitchParameter PassThru { get; set; }
 
     protected override void BeginProcessing()
     {
-        if (Password is not null && NewRandomKey)
+        if (PrincipalCommandHelper.CheckKeyParameters(Password, NewRandomKey, EncryptionType, Key, Kvno, Salt) is
+            ErrorRecord error)
         {
-            ThrowTerminatingError(new ErrorRecord(
-                new ArgumentException("Password and NewRandomKey cannot be set together"),
-                "PasswordWithNewRandomKey",
-                ErrorCategory.InvalidArgument,
-                null));
-        }
-
-        if (Password is not null && Password.Length == 0)
-        {
-            ThrowTerminatingError(new ErrorRecord(
-                new ArgumentException("The password must not be empty"),
-                "EmptyPassword",
-                ErrorCategory.InvalidArgument,
-                null));
+            ThrowTerminatingError(error);
         }
     }
 
@@ -121,6 +121,29 @@ public sealed class SetObolPrincipal : PSCmdlet
                 continue;
             }
 
+            // The keys are taken from the entries for the principal name or the aliases it has after the change.
+            ImportedKeys? importedKeys = null;
+            if (Key is not null)
+            {
+                string[] names = [
+                    principal.Name,
+                    .. aliases?.Select(PrincipalName.Unparse) ?? principal.Alias,
+                ];
+                importedKeys = KeytabKeySelector.Select(
+                    this,
+                    Key,
+                    principal.Store,
+                    names,
+                    principal.FullName,
+                    Kvno,
+                    out error);
+                if (importedKeys is null)
+                {
+                    WriteError(error!);
+                    continue;
+                }
+            }
+
             if (!ShouldProcess(principal.FullName, "Set principal"))
             {
                 continue;
@@ -128,7 +151,8 @@ public sealed class SetObolPrincipal : PSCmdlet
 
             try
             {
-                principal.Store.Update(principal, Password, NewRandomKey, etypes, flags, aliases);
+                principal.Store.Update(principal, Password, NewRandomKey, etypes, flags, aliases, Salt, importedKeys,
+                    Kvno);
             }
             catch (PrincipalStoreException e)
             {

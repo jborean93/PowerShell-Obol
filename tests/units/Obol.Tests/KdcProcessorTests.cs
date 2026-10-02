@@ -663,6 +663,19 @@ public class KdcProcessorTests
         await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_BADKEYVER);
     }
 
+    [Test]
+    public async Task RejectsTgtAfterKrbtgtKvnoChange()
+    {
+        // Renumbering the keys without changing them still rejects TGTs issued with the old kvno.
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        realm.Store.Update(realm.Store.Krbtgt, kvno: 2);
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start));
+
+        await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_BADKEYVER);
+    }
+
     private static readonly KrbHostAddress s_tgtAddress = new()
     {
         AddressType = AddressType.IPv4,

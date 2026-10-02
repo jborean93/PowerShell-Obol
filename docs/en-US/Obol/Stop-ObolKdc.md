@@ -39,8 +39,8 @@ Calling `Dispose()` on the KDC object does the same thing.
 ### Example 1: Stop a KDC
 
 ```powershell
-PS C:\> $kdc = Start-ObolKdc -Realm EXAMPLE.TEST
-PS C:\> Stop-ObolKdc -Kdc $kdc
+$kdc = Start-ObolKdc -Realm EXAMPLE.TEST
+Stop-ObolKdc -Kdc $kdc
 ```
 
 Starts and then stops a KDC.
@@ -48,7 +48,7 @@ Starts and then stops a KDC.
 ### Example 2: Stop all KDCs
 
 ```powershell
-PS C:\> Get-ObolKdc | Stop-ObolKdc
+Get-ObolKdc | Stop-ObolKdc
 ```
 
 Stops every KDC running in the current runspace.

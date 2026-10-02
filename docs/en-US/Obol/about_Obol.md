@@ -73,3 +73,53 @@ The SID of a principal is the domain SID of the KDC followed by the RID of the p
   RIDs are not reused after a principal is removed unless they are set with `-Rid`.
 
 Set the domain SID and RIDs to get the same SIDs each time a KDC is started, such as for access control entries that refer to them, or to match the SIDs of an existing domain.
+
+# KEYS AND SALTS
+A principal's long-term keys come from one of three places:
+
++ A password with `-Password`: a key is derived for each encryption type from the password and a salt (RFC 3962 and RFC 8009).
++ Random keys when neither `-Password` nor `-Key` is set, like MIT `addprinc -randkey`.
++ Existing keys from a keytab with `-Key`, see [KEYS FROM A KEYTAB](#keys-from-a-keytab).
+
+The salt is a string combined with the password so the same password gives different keys for different principals.
+By default it is the RFC 4120 salt used by MIT and Heimdal, the realm followed by each name component, such as `EXAMPLE.TESTHTTPweb.example.test`.
+The KDC tells a client the salt in its reply (`PA-ETYPE-INFO2`) when the client authenticates with a password, so a password login works whatever the salt is.
+
+The salt only matters when the KDC's keys must be the same as keys derived somewhere else, where nothing asks the KDC for the salt:
+
++ An account of another KDC, such as an AD account whose keys a service already has from a `ktpass` or `msktutil` keytab, or a domain joined Windows host whose computer account keys are derived from its machine password.
+  AD uses its own salts, use `ConvertTo-ObolSalt` to get them and set the account's `msDS-KeyVersionNumber` with `-Kvno` so the keytab matches.
++ A keytab made with `New-ObolKeytabEntry -Password` for a principal created with a different salt.
+
+When the KDC creates the keys and a service gets them with `Export-ObolKeytab` or `ConvertTo-ObolKeytab` the salt never matters, the service has the same keys.
+
+Random keys have no salt and no password can log in with them, they suit principals that only use their keys from a keytab, such as services, clients that log in with `kinit -k` or a keytab credential, and the `krbtgt` principal.
+Use `-Password` and export the keytab for a principal that needs both password and keytab logins.
+
+This creates a service principal with the keys of the AD account `svc_web` for the same password, so a `ktpass` keytab made for the account decrypts the tickets the KDC issues:
+
+```powershell
+$password = Read-Host -AsSecureString -Prompt Password
+$kdc = Start-ObolKdc -Realm CORP.EXAMPLE
+$salt = ConvertTo-ObolSalt svc_web -Realm CORP.EXAMPLE -SaltType ADUser
+$kdc | New-ObolPrincipal HTTP/web.corp.example -Password $password -Salt $salt -Kvno 3
+```
+
+# KEYS FROM A KEYTAB
+The `-Key` parameter of `New-ObolPrincipal`, `Set-ObolPrincipal` and `New-ObolPrincipalSetting` gives a principal the keys of keytab entries, as output by `Import-ObolKeytab`, `ConvertFrom-ObolKeytab` or `New-ObolKeytabEntry`.
+Use it when a service already has a keytab, such as one built into a container image or made by `ktpass`, so the service can decrypt the tickets the KDC issues.
+
+The keys are chosen from the entries like this:
+
++ Only entries for the principal's name or one of its aliases in the KDC realm are used, others are ignored, so the entries of a whole keytab can be passed.
++ An entry with an encryption type Obol does not support, such as RC4 or DES, or a key of the wrong size writes a warning and is ignored.
++ The keys with the newest kvno are used unless `-Kvno` chooses another one, the principal gets that kvno and the encryption types of those keys in the order of the entries.
++ A type that only has a key with an older kvno writes a warning, it is most likely a key that was not updated.
++ Different keys for the same encryption type and kvno, or no usable entry, is an error and the principal is not created or changed.
+
+`-Key` cannot be used with `-Password`, `-NewRandomKey` or `-EncryptionType`, filter the entries with `Where-Object` to choose the encryption types.
+A keytab does not hold the salt of its keys, set `-Salt` if a client logs in with the password the keys were derived from and the salt is not the default, see [KEYS AND SALTS](#keys-and-salts).
+
+```powershell
+$kdc | New-ObolPrincipal HTTP/web.example.test -Key (Import-ObolKeytab ./http.keytab)
+```

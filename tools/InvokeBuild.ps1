@@ -245,57 +245,43 @@ task PesterTests {
     $coveragePath = [Path]::Combine($Manifest.TestResultsPath, "Integration.Coverage.cobertura.xml")
     $pwshHome = Split-Path -Path $pwsh -Parent
 
-    # DoesNotReturnAttribute = AllAssemblies needs the instrumenter to resolve
-    # S.M.A to see any pwsh [DoesNotReturn] attribute, for example
-    # Cmdlet.ThrowTerminatingError, and not include the return path as a missed
-    # coverage branch. As the instrumenter needs to resolve the assemblies
-    # correctly, it is important to have the instrumented files in place before
-    # running the tests. Our assemblies (the ones with a pdb) are instrumented
-    # in a copy of the bin folder with the S.M.A of the pwsh under test and then
-    # copied over the module until the tests finish.
-    $sessionId = [Guid]::NewGuid().Guid
-    $instrumentPath = [Path]::Combine($Manifest.TestResultsPath, 'Instrumented')
-    Remove-Item -LiteralPath $instrumentPath -Recurse -Force -ErrorAction Ignore
-    $null = New-Item -Path $instrumentPath -ItemType Directory
-    Copy-Item -Path ([Path]::Combine($watchFolder, '*')) -Destination $instrumentPath
-    Copy-Item -LiteralPath ([Path]::Combine($pwshHome, 'System.Management.Automation.dll')) -Destination $instrumentPath
-
-    $instrumentedFiles = @(
+    # Our assemblies are the ones with a pdb, the Loader is ALC boilerplate
+    # and is excluded. dotnet-coverage collect instruments them for the run
+    # with --include-files.
+    $includeFiles = @(
         Get-ChildItem -LiteralPath $watchFolder -Filter "*.pdb" |
             Where-Object BaseName -NE "$($Manifest.Module.Name).Loader" |
             ForEach-Object {
-                $dll = "$($_.BaseName).dll"
-                $instrumentArgs = @(
-                    'instrument'
-                    [Path]::Combine($instrumentPath, $dll)
-                    '--session-id', $sessionId
-                    '--settings', $Manifest.TestSettingsPath
-                    '--nologo'
-                )
-                dotnet-coverage @instrumentArgs | Out-Host
-                if ($LASTEXITCODE) {
-                    throw "Failed to instrument $dll"
-                }
-
-                $dll
-                $_.Name
+                [Path]::Combine($watchFolder, "$($_.BaseName).dll")
             }
     )
+
+    # DoesNotReturnAttribute = AllAssemblies needs the instrumenter to resolve
+    # S.M.A next to our assemblies to see any pwsh [DoesNotReturn] attribute,
+    # for example Cmdlet.ThrowTerminatingError, and not include the return
+    # path as a missed coverage branch. The S.M.A of the pwsh under test is
+    # copied there for the run. The module still uses the pwsh copy as the
+    # loader only resolves the assemblies in Obol.deps.json, see
+    # tests/Alc.Tests.ps1.
+    $smaPath = [Path]::Combine($watchFolder, 'System.Management.Automation.dll')
 
     $arguments = @(
         'collect'
         $pwsh
         $pwshArguments
-        '--session-id', $sessionId
         '--output', $coveragePath
         '--settings', $Manifest.TestSettingsPath
+        foreach ($file in $includeFiles) {
+            '--include-files', $file
+        }
     )
 
     $origEnv = $env:PSModulePath
     try {
-        foreach ($name in $instrumentedFiles) {
-            Copy-Item -LiteralPath ([Path]::Combine($instrumentPath, $name)) -Destination $watchFolder -Force
-        }
+        $pwshSma = [Path]::Combine(
+            $pwshHome,
+            'System.Management.Automation.dll')
+        Copy-Item -LiteralPath $pwshSma -Destination $smaPath
 
         $env:PSModulePath = @(
             [Path]::Combine($pwshHome, "Modules")
@@ -305,13 +291,7 @@ task PesterTests {
         dotnet-coverage @arguments
     }
     finally {
-        # instrument keeps the original of each file it changes as .orig.
-        foreach ($name in $instrumentedFiles) {
-            Copy-Item -LiteralPath ([Path]::Combine($instrumentPath, "$name.orig")) `
-                -Destination ([Path]::Combine($watchFolder, $name)) -Force
-        }
-        Remove-Item -LiteralPath $instrumentPath -Recurse -Force
-
+        Remove-Item -LiteralPath $smaPath -Force -ErrorAction Ignore
         $env:PSModulePath = $origEnv
     }
 
@@ -332,24 +312,24 @@ task CoverageReport {
         Remove-Item $mergedCoveragePath -Force
     }
 
+    # ReportGenerator merges the unit test and Pester reports by file and
+    # line, keeping the line and branch coverage of both.
     $coverageFiles = Get-ChildItem -Path $Manifest.TestResultsPath -Filter "*.Coverage.cobertura.xml"
-    dotnet-coverage merge $coverageFiles.FullName --output $mergedCoveragePath --output-format cobertura
-    if ($LASTEXITCODE) {
-        throw "Failed to merge coverage files"
-    }
-
     $reportPath = [Path]::Combine($Manifest.TestResultsPath, "CoverageReport")
     $reportArgs = @(
-        "-reports:$mergedCoveragePath"
+        "-reports:$($coverageFiles.FullName -join ';')"
         "-sourcedirs:$($Manifest.RepositoryPath)/src"
         "-targetdir:$reportPath"
         '-filefilters:-*.g.cs'  # Filter out source generated files
-        '-reporttypes:Html_Dark;JsonSummary'
+        '-reporttypes:Html_Dark;JsonSummary;Cobertura'
     )
     reportgenerator @reportArgs
     if ($LASTEXITCODE) {
         throw "reportgenerator failed with RC of $LASTEXITCODE"
     }
+
+    $mergedReport = [Path]::Combine($reportPath, 'Cobertura.xml')
+    Copy-Item -LiteralPath $mergedReport -Destination $mergedCoveragePath
 
     $coverageScript = [Path]::Combine($PSScriptRoot, 'CoverageReport.ps1')
     & $coverageScript -Path $mergedCoveragePath

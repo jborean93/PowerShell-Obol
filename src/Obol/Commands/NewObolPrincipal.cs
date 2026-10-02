@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Management.Automation;
 using System.Security;
 using Obol.Protocol;
@@ -7,12 +8,19 @@ namespace Obol.Commands;
 
 [Cmdlet(
     VerbsCommon.New, "ObolPrincipal",
-    DefaultParameterSetName = "Parameter",
+    DefaultParameterSetName = RandomParameterSet,
     SupportsShouldProcess = true
 )]
 [OutputType(typeof(ObolPrincipal))]
 public sealed class NewObolPrincipal : PSCmdlet
 {
+    // The sets follow where the keys come from, -Setting and Start-ObolKdc -Principal still check the combinations
+    // when the cmdlet runs as a setting cast from a hashtable skips parameter binding.
+    private const string RandomParameterSet = "Random";
+    private const string PasswordParameterSet = "Password";
+    private const string KeyParameterSet = "Key";
+    private const string SettingParameterSet = "Setting";
+
     [Parameter(
         Mandatory = true,
         ValueFromPipeline = true
@@ -28,37 +36,87 @@ public sealed class NewObolPrincipal : PSCmdlet
     public string Name { get; set; } = "";
 
     [Parameter(
-        ParameterSetName = "Parameter"
+        Mandatory = true,
+        ParameterSetName = PasswordParameterSet
     )]
     [ValidateNotNull]
     public SecureString? Password { get; set; }
 
     [Parameter(
-        ParameterSetName = "Parameter"
+        ParameterSetName = RandomParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = PasswordParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = KeyParameterSet
     )]
     public ObolPrincipalFlag Flag { get; set; }
 
     [Parameter(
-        ParameterSetName = "Parameter"
+        ParameterSetName = RandomParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = PasswordParameterSet
     )]
     [ValidateNotNull]
     public ObolEncryptionType[]? EncryptionType { get; set; }
 
     [Parameter(
-        ParameterSetName = "Parameter"
+        ParameterSetName = RandomParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = PasswordParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = KeyParameterSet
     )]
     [ValidateNotNull]
     public string[]? Alias { get; set; }
 
     [Parameter(
-        ParameterSetName = "Parameter"
+        ParameterSetName = RandomParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = PasswordParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = KeyParameterSet
     )]
     [ValidateRange(1, int.MaxValue)]
     public int? Rid { get; set; }
 
     [Parameter(
         Mandatory = true,
-        ParameterSetName = "Setting"
+        ParameterSetName = KeyParameterSet
+    )]
+    [ValidateNotNull]
+    public ObolKeytabEntry[]? Key { get; set; }
+
+    [Parameter(
+        ParameterSetName = RandomParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = PasswordParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = KeyParameterSet
+    )]
+    [ValidateRange(0, int.MaxValue)]
+    public int? Kvno { get; set; }
+
+    [Parameter(
+        ParameterSetName = PasswordParameterSet
+    )]
+    [Parameter(
+        ParameterSetName = KeyParameterSet
+    )]
+    [ValidateNotNull]
+    public string? Salt { get; set; }
+
+    [Parameter(
+        Mandatory = true,
+        ParameterSetName = SettingParameterSet
     )]
     [ValidateNotNull]
     public ObolPrincipalSetting? Setting { get; set; }
@@ -72,6 +130,9 @@ public sealed class NewObolPrincipal : PSCmdlet
             EncryptionType = EncryptionType,
             Alias = Alias,
             Rid = Rid,
+            Key = Key,
+            Kvno = Kvno,
+            Salt = Salt,
         };
 
         ObolPrincipal? principal = Create(this, Kdc!, Name, setting, out ErrorRecord? error);
@@ -131,17 +192,37 @@ public sealed class NewObolPrincipal : PSCmdlet
             return null;
         }
 
-        if (setting.Password is not null && setting.Password.Length == 0)
+        error = PrincipalCommandHelper.CheckKeyParameters(
+            setting.Password,
+            false,
+            setting.EncryptionType,
+            setting.Key,
+            setting.Kvno,
+            setting.Salt);
+        if (error is not null)
         {
-            error = new ErrorRecord(
-                new ArgumentException("The password must not be empty"),
-                "EmptyPassword",
-                ErrorCategory.InvalidArgument,
-                name);
             return null;
         }
 
         string fullName = $"{PrincipalName.Unparse(components)}@{kdc.Realm}";
+        ImportedKeys? importedKeys = null;
+        if (setting.Key is not null)
+        {
+            string[] names = [PrincipalName.Unparse(components), .. aliases?.Select(PrincipalName.Unparse) ?? []];
+            importedKeys = KeytabKeySelector.Select(
+                cmdlet,
+                setting.Key,
+                kdc.Store,
+                names,
+                fullName,
+                setting.Kvno,
+                out error);
+            if (importedKeys is null)
+            {
+                return null;
+            }
+        }
+
         if (!cmdlet.ShouldProcess(fullName, "Create principal"))
         {
             return null;
@@ -150,7 +231,7 @@ public sealed class NewObolPrincipal : PSCmdlet
         try
         {
             return kdc.Store.Create(components, setting.Password, setting.Flag, etypes, aliases,
-                (uint?)setting.Rid);
+                (uint?)setting.Rid, setting.Salt, importedKeys, setting.Kvno);
         }
         catch (PrincipalStoreException e)
         {

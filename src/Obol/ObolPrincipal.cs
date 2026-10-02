@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Threading;
 using Obol.Protocol;
 
@@ -44,6 +45,11 @@ public sealed class ObolPrincipal
 
     /// <summary>The encryption types the principal has keys for, in order of preference.</summary>
     public ObolEncryptionType[] EncryptionType => State.EncryptionTypes;
+
+    /// <summary>
+    /// The salt sent to clients to derive the principal's keys from its password, not set for random keys.
+    /// </summary>
+    public string? Salt => State.Keys.FirstOrDefault()?.Salt;
 
     /// <summary>The options turned on for the principal, such as not requiring pre-authentication.</summary>
     public ObolPrincipalFlag Flag => State.Flags;

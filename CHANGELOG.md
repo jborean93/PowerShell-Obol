@@ -3,6 +3,33 @@
 ## v0.1.0 - TBD
 
 + Initial version of the `Obol` module
-+ Added `Start-ObolKdc`, `Get-ObolKdc` and `Stop-ObolKdc` to run a Kerberos KDC in the current PowerShell process
-+ Added `New-ObolPrincipal`, `Get-ObolPrincipal`, `Set-ObolPrincipal` and `Remove-ObolPrincipal` to manage the principals of a KDC
-+ Added `New-ObolPrincipalSetting` to define the settings of a principal for `Start-ObolKdc -Principal` and `New-ObolPrincipal -Setting`
+
+Cmdlets present with this initial release.
+
+### KDC
+
++ [Start-ObolKdc](docs/en-US/Obol/Start-ObolKdc.md): Starts an Obol Kerberos KDC.
++ [Get-ObolKdc](docs/en-US/Obol/Get-ObolKdc.md): Gets the Obol KDCs running in the current runspace.
++ [Stop-ObolKdc](docs/en-US/Obol/Stop-ObolKdc.md): Stops an Obol KDC.
+
+### Principals
+
++ [New-ObolPrincipal](docs/en-US/Obol/New-ObolPrincipal.md): Creates a principal in the realm of an Obol KDC.
++ [Get-ObolPrincipal](docs/en-US/Obol/Get-ObolPrincipal.md): Gets the principals of Obol KDCs.
++ [Set-ObolPrincipal](docs/en-US/Obol/Set-ObolPrincipal.md): Changes principals of an Obol KDC.
++ [Remove-ObolPrincipal](docs/en-US/Obol/Remove-ObolPrincipal.md): Removes principals from an Obol KDC.
++ [New-ObolPrincipalSetting](docs/en-US/Obol/New-ObolPrincipalSetting.md): Creates the settings for a principal to create with `Start-ObolKdc -Principal` or `New-ObolPrincipal -Setting`.
+
+### Keytabs
+
++ [Export-ObolKeytab](docs/en-US/Obol/Export-ObolKeytab.md): Exports the keys of principals of an Obol KDC to a keytab file.
++ [Import-ObolKeytab](docs/en-US/Obol/Import-ObolKeytab.md): Imports the entries of keytab files.
++ [ConvertTo-ObolKeytab](docs/en-US/Obol/ConvertTo-ObolKeytab.md): Converts the keys of principals or keytab entries to the bytes of a keytab.
++ [ConvertFrom-ObolKeytab](docs/en-US/Obol/ConvertFrom-ObolKeytab.md): Converts the bytes of a keytab to keytab entries.
++ [New-ObolKeytabEntry](docs/en-US/Obol/New-ObolKeytabEntry.md): Creates keytab entries from a password or key.
++ [ConvertTo-ObolSalt](docs/en-US/Obol/ConvertTo-ObolSalt.md): Converts a principal or account name to the salt its keys are derived from a password with.
+
+### Client configuration
+
++ [ConvertTo-ObolKrb5Config](docs/en-US/Obol/ConvertTo-ObolKrb5Config.md): Creates a krb5.conf for Obol KDCs as a string.
++ [Export-ObolKrb5Config](docs/en-US/Obol/Export-ObolKrb5Config.md): Writes a krb5.conf for Obol KDCs to a file.

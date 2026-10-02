@@ -47,8 +47,8 @@ Starting a KDC does not change any system or process configuration, including fi
 ### Example 1: Start a KDC on a random port
 
 ```powershell
-PS C:\> $kdc = Start-ObolKdc -Realm EXAMPLE.TEST
-PS C:\> $kdc.Port
+$kdc = Start-ObolKdc -Realm EXAMPLE.TEST
+$kdc.Port
 ```
 
 Starts a KDC for the realm `EXAMPLE.TEST` on a random port on `127.0.0.1` and outputs the port it is listening on.
@@ -56,7 +56,7 @@ Starts a KDC for the realm `EXAMPLE.TEST` on a random port on `127.0.0.1` and ou
 ### Example 2: Start a KDC on a specific address and port
 
 ```powershell
-PS C:\> Start-ObolKdc -Realm EXAMPLE.TEST -Address :: -Port 8088
+Start-ObolKdc -Realm EXAMPLE.TEST -Address :: -Port 8088
 ```
 
 Starts a KDC that listens on TCP and UDP port 8088 for all IPv6 and IPv4 addresses.
@@ -64,7 +64,7 @@ Starts a KDC that listens on TCP and UDP port 8088 for all IPv6 and IPv4 address
 ### Example 3: Start a KDC on the standard Kerberos port
 
 ```powershell
-PS C:\> Start-ObolKdc -Realm EXAMPLE.TEST -Address 0.0.0.0 -Port 88
+Start-ObolKdc -Realm EXAMPLE.TEST -Address 0.0.0.0 -Port 88
 ```
 
 Starts a KDC on TCP and UDP port 88 for all IPv4 addresses, the port Windows clients always use to contact a KDC.
@@ -72,8 +72,8 @@ Starts a KDC on TCP and UDP port 88 for all IPv4 addresses, the port Windows cli
 ### Example 4: Start a KDC with principals
 
 ```powershell
-PS C:\> $password = Read-Host -AsSecureString -Prompt Password
-PS C:\> Start-ObolKdc -Realm EXAMPLE.TEST -Principal ([ordered]@{
+$password = Read-Host -AsSecureString -Prompt Password
+Start-ObolKdc -Realm EXAMPLE.TEST -Principal ([ordered]@{
     user = $password
     'HTTP/web.example.test' = $null
     roast = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth
@@ -86,11 +86,11 @@ The principals are created before the KDC answers any request.
 ### Example 5: Add principals after starting the KDC
 
 ```powershell
-PS C:\> $kdc = Start-ObolKdc -Realm EXAMPLE.TEST
-PS C:\> $password = Read-Host -AsSecureString -Prompt Password
-PS C:\> $kdc | New-ObolPrincipal user -Password $password
-PS C:\> $kdc | New-ObolPrincipal HTTP/web.example.test
-PS C:\> $kdc | New-ObolPrincipal roast -Password $password -Flag DoesNotRequirePreAuth
+$kdc = Start-ObolKdc -Realm EXAMPLE.TEST
+$password = Read-Host -AsSecureString -Prompt Password
+$kdc | New-ObolPrincipal user -Password $password
+$kdc | New-ObolPrincipal HTTP/web.example.test
+$kdc | New-ObolPrincipal roast -Password $password -Flag DoesNotRequirePreAuth
 ```
 
 Creates the same principals as the previous example with `New-ObolPrincipal` after the KDC has started.
@@ -99,7 +99,7 @@ Principals can be added, changed and removed while the KDC is running, a client 
 ### Example 6: Start a TCP only KDC
 
 ```powershell
-PS C:\> Start-ObolKdc -Realm EXAMPLE.TEST -Transport Tcp
+Start-ObolKdc -Realm EXAMPLE.TEST -Transport Tcp
 ```
 
 Starts a KDC that only listens over TCP, for example to test that a client falls back to TCP when UDP fails.
@@ -107,7 +107,7 @@ Starts a KDC that only listens over TCP, for example to test that a client falls
 ### Example 7: Force UDP replies to be too big
 
 ```powershell
-PS C:\> Start-ObolKdc -Realm EXAMPLE.TEST -MaxUdpReplySize 100
+Start-ObolKdc -Realm EXAMPLE.TEST -MaxUdpReplySize 100
 ```
 
 Starts a KDC that replies with `KRB_ERR_RESPONSE_TOO_BIG` to any UDP request whose reply is more than 100 bytes, to test that a client retries the request over TCP.
@@ -115,10 +115,13 @@ Starts a KDC that replies with `KRB_ERR_RESPONSE_TOO_BIG` to any UDP request who
 ### Example 8: Start a KDC with a set domain SID
 
 ```powershell
-PS C:\> $kdc = Start-ObolKdc -Realm EXAMPLE.TEST -DomainSid S-1-5-21-1111111111-2222222222-3333333333 -Principal @{
+$kdc = Start-ObolKdc -Realm EXAMPLE.TEST -DomainSid S-1-5-21-1111111111-2222222222-3333333333 -Principal @{
     'HTTP/web.example.test' = $null
 }
-PS C:\> ($kdc | Get-ObolPrincipal HTTP/web.example.test).Sid
+($kdc | Get-ObolPrincipal HTTP/web.example.test).Sid
+```
+
+```Output
 S-1-5-21-1111111111-2222222222-3333333333-1000
 ```
 
