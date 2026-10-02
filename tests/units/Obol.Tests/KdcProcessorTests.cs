@@ -1049,4 +1049,212 @@ public class KdcProcessorTests
         KrbPaData paData = part.EncryptedPaData!.MethodData.Single(p => p.Type == PaDataType.PA_SUPPORTED_ETYPES);
         return BinaryPrimitives.ReadUInt32LittleEndian(paData.Value.Span[..4]);
     }
+
+    /// <summary>
+    /// Re-encrypts the TGT with the krbtgt key after changing its decrypted part, like a TGT from a KDC with the key.
+    /// </summary>
+    private static KrbAsRep ReissueTgt(TestRealm realm, KrbAsRep tgt, Action<KrbEncTicketPart> change)
+    {
+        KerberosKey krbtgtKey = realm.Store.Krbtgt.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KrbEncTicketPart part = tgt.Ticket.EncryptedPart.Decrypt(
+            krbtgtKey,
+            KeyUsage.Ticket,
+            b => KrbEncTicketPart.DecodeApplication(b));
+        change(part);
+
+        KrbEncryptedData encrypted = KrbEncryptedData.Encrypt(part.EncodeApplication(), krbtgtKey, KeyUsage.Ticket);
+        encrypted.KeyVersionNumber = tgt.Ticket.EncryptedPart.KeyVersionNumber;
+        return new KrbAsRep
+        {
+            CName = tgt.CName,
+            CRealm = tgt.CRealm,
+            Ticket = new KrbTicket
+            {
+                Realm = tgt.Ticket.Realm,
+                SName = tgt.Ticket.SName,
+                EncryptedPart = encrypted,
+            },
+        };
+    }
+
+    /// <summary>Copies the ticket with a different realm, name or encrypted part, the cipher is kept as is.</summary>
+    private static KrbTicket CopyTicket(KrbTicket ticket, string? realm = null, KrbPrincipalName? sname = null,
+        EncryptionType? etype = null, bool keepKvno = true) => new()
+    {
+        Realm = realm ?? ticket.Realm,
+        SName = sname ?? ticket.SName,
+        EncryptedPart = new KrbEncryptedData
+        {
+            EType = etype ?? ticket.EncryptedPart.EType,
+            KeyVersionNumber = keepKvno ? ticket.EncryptedPart.KeyVersionNumber : null,
+            Cipher = ticket.EncryptedPart.Cipher,
+        },
+    };
+
+    [Test]
+    [Arguments(true)]
+    [Arguments(false)]
+    public async Task RejectsRequestTagOfOtherClass(bool asReq)
+    {
+        // The AS-REQ and TGS-REQ application tag numbers in the context specific class are not requests.
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        byte[] request = asReq
+            ? NewAsReq("user", null, s_start).EncodeApplication().ToArray()
+            : NewTgsReq(tgt, tgtPart, s_start).EncodeApplication().ToArray();
+        request[0] = (byte)((request[0] & 0x3F) | 0x80);
+
+        ReadOnlyMemory<byte> reply = realm.Processor.Process(request);
+
+        await AssertError(reply, KerberosErrorCode.KRB_ERR_GENERIC);
+        await Assert.That(KrbError.DecodeApplication(reply).EText).Contains("is not supported");
+    }
+
+    [Test]
+    public async Task RejectsAsReqWithoutServiceEncryptionType()
+    {
+        // The client has a key for the requested type for the reply, the service does not for the session key.
+        TestRealm realm = new();
+        realm.Store.Create(["aes128"], password: null, flags: ObolPrincipalFlag.None,
+            encryptionTypes: [ObolEncryptionType.Aes128Sha1]);
+        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KrbAsReq request = NewAsReq("user", key, s_start, sname: Name("aes128"));
+        request.Body.EType = [EncryptionType.AES256_CTS_HMAC_SHA1_96];
+
+        await AssertError(realm.Send(request), KerberosErrorCode.KDC_ERR_ETYPE_NOSUPP);
+    }
+
+    [Test]
+    public async Task RejectsTgsReqWithoutPaData()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        KrbTgsReq request = NewTgsReq(tgt, tgtPart, s_start);
+        request.PaData = null;
+
+        await AssertError(realm.Send(request), KerberosErrorCode.KDC_ERR_PADATA_TYPE_NOSUPP);
+    }
+
+    [Test]
+    public async Task RejectsTgtOfOtherRealm()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start,
+            ticket: CopyTicket(tgt.Ticket, realm: "OTHER.TEST")));
+
+        await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_NOT_US);
+    }
+
+    [Test]
+    public async Task RejectsTicketForUnknownService()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start,
+            ticket: CopyTicket(tgt.Ticket, sname: Name("missing", Realm))));
+
+        await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_NOT_US);
+    }
+
+    [Test]
+    public async Task RejectsTgtWithEncryptionTypeKrbtgtHasNoKeyFor()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start,
+            ticket: CopyTicket(tgt.Ticket, etype: EncryptionType.RC4_HMAC_NT)));
+
+        await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_BADKEYVER);
+        await Assert.That(KrbError.DecodeApplication(reply).EText)
+            .IsEqualTo("The krbtgt principal has no key for the encryption type RC4_HMAC_NT");
+    }
+
+    [Test]
+    public async Task AcceptsTgtWithoutKvno()
+    {
+        // The kvno is optional in EncryptedData, without it the current krbtgt key is used.
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start,
+            ticket: CopyTicket(tgt.Ticket, keepKvno: false)));
+
+        await Assert.That(reply.Span[0]).IsEqualTo((byte)0x6D);
+    }
+
+    [Test]
+    public async Task RejectsAuthenticatorForOtherRealm()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        KrbAsRep otherRealm = new()
+        {
+            CName = tgt.CName,
+            CRealm = "OTHER.TEST",
+            Ticket = tgt.Ticket,
+        };
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(otherRealm, tgtPart, s_start));
+
+        await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_BADMATCH);
+    }
+
+    [Test]
+    public async Task RenewsTgtWithoutStartTime()
+    {
+        // The start time is optional, the auth time is the start of the ticket without it.
+        TestRealm realm = new();
+        (KrbAsRep issued, KrbEncAsRepPart tgtPart) = realm.GetTgt(b =>
+        {
+            b.KdcOptions |= KdcOptions.Renewable;
+            b.RTime = b.Till.AddHours(4);
+        });
+        KrbAsRep tgt = ReissueTgt(realm, issued, p => p.StartTime = null);
+        realm.Clock.Now = s_start.AddMinutes(30);
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, realm.Clock.Now, service: $"krbtgt/{Realm}",
+            configureBody: b => b.KdcOptions |= KdcOptions.Renew));
+
+        KrbEncTgsRepPart renewed = DecryptTgsRep(KrbTgsRep.DecodeApplication(reply), tgtPart);
+        await Assert.That(renewed.StartTime).IsEqualTo(realm.Clock.Now);
+        await Assert.That(renewed.EndTime).IsEqualTo(realm.Clock.Now + (tgtPart.EndTime - tgtPart.AuthTime));
+    }
+
+    [Test]
+    public async Task RejectsUserToUserWithoutAdditionalTickets()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start, service: "user",
+            configureBody: b =>
+            {
+                b.KdcOptions |= KdcOptions.EncTktInSkey;
+                b.AdditionalTickets = null;
+            }));
+
+        await AssertError(reply, KerberosErrorCode.KDC_ERR_BADOPTION);
+    }
+
+    [Test]
+    public async Task RejectsUserToUserTicketKrbtgtHasNoKeyFor()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start, service: "user",
+            configureBody: b =>
+            {
+                b.KdcOptions |= KdcOptions.EncTktInSkey;
+                b.AdditionalTickets = [CopyTicket(tgt.Ticket, etype: EncryptionType.RC4_HMAC_NT)];
+            }));
+
+        await AssertError(reply, KerberosErrorCode.KDC_ERR_BADOPTION);
+        await Assert.That(KrbError.DecodeApplication(reply).EText)
+            .IsEqualTo("The additional ticket is not a ticket granting ticket");
+    }
 }

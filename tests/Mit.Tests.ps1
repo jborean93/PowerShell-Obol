@@ -232,4 +232,23 @@ Describe "MIT krb5" -Skip:(-not $mitKrb5) {
             Invoke-KerberosTool { klist } | Should-BeLikeString '*HTTP/web.example.test@EXAMPLE.TEST*'
         }
     }
+
+    Context "Use-ObolKdc" {
+        It "Gets tickets in the scriptblock" {
+            $params = @{
+                Realm = 'EXAMPLE.TEST'
+                Principal = @{ user = $null; 'HTTP/web.example.test' = $null }
+                ClientPrincipal = 'user'
+                ServicePrincipal = 'HTTP/web.example.test'
+                Provider = 'Mit'
+            }
+            $actual = Use-ObolKdc @params {
+                $null = Invoke-KerberosTool { kinit -k -i user }
+                Invoke-KerberosTool { kvno -k $env:KRB5_KTNAME HTTP/web.example.test }
+            }
+
+            $actual | Should-BeLikeString '*HTTP/web.example.test@EXAMPLE.TEST: kvno = 1, keytab entry valid*'
+            Get-ObolKdc | Should-BeNull
+        }
+    }
 }

@@ -112,7 +112,8 @@ internal sealed class KdcListener : IDisposable
 
     private static (Socket? Tcp, Socket? Udp) BindSockets(IPEndPoint endpoint, bool tcp, bool udp)
     {
-        // A random TCP port may already be used for UDP, try a few before giving up.
+        // A random TCP port may already be used for UDP, try a few before giving up. On Windows the port can also be
+        // in a range reserved for UDP only, such as by Hyper-V or WinNAT, which fails with access denied.
         int attempts = endpoint.Port == 0 && tcp && udp ? RandomPortAttempts : 1;
         for (int i = 1; ; i++)
         {
@@ -140,7 +141,8 @@ internal sealed class KdcListener : IDisposable
 
                 return (tcpSocket, udpSocket);
             }
-            catch (SocketException e) when (e.SocketErrorCode == SocketError.AddressAlreadyInUse
+            catch (SocketException e) when (
+                e.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied
                 && udpSocket is not null
                 && i < attempts)
             {

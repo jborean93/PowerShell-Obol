@@ -85,13 +85,33 @@ public sealed class EnterObolKrb5Environment : PSCmdlet
             return;
         }
 
+        Enter(this, _kdcs, Provider, ServicePrincipal, ClientPrincipal, SetNativeEnvironment, setPrompt: !NoPrompt);
+    }
+
+    /// <summary>Writes the files, sets the environment variables and optionally the prompt.</summary>
+    /// <param name="cmdlet">The cmdlet to write to and throw the terminating errors of.</param>
+    /// <param name="kdcs">The KDCs to use, each checked with <see cref="Krb5Config.CheckKdc"/>.</param>
+    /// <param name="provider">The Kerberos implementation the krb5.conf is for.</param>
+    /// <param name="servicePrincipals">The principals for KRB5_KTNAME, not set if empty.</param>
+    /// <param name="clientPrincipals">The principals for KRB5_CLIENT_KTNAME, not set if empty.</param>
+    /// <param name="setNativeEnvironment">Also set the C library's environment on Linux and macOS.</param>
+    /// <param name="setPrompt">Add the realm to the prompt of the current runspace.</param>
+    internal static Krb5Environment Enter(
+        PSCmdlet cmdlet,
+        IReadOnlyList<ObolKdc> kdcs,
+        ObolKrb5Provider provider,
+        IReadOnlyCollection<ObolPrincipal> servicePrincipals,
+        IReadOnlyCollection<ObolPrincipal> clientPrincipals,
+        bool setNativeEnvironment,
+        bool setPrompt)
+    {
         // Only the current user can read the directory on Linux and macOS.
         DirectoryInfo directory = Directory.CreateTempSubdirectory("obol-");
-        bool entered = false;
+        Krb5Environment? environment = null;
         try
         {
             string krb5Conf = Path.Combine(directory.FullName, "krb5.conf");
-            File.WriteAllText(krb5Conf, Krb5Config.Create(_kdcs, Provider), new UTF8Encoding(false));
+            File.WriteAllText(krb5Conf, Krb5Config.Create(kdcs, provider), new UTF8Encoding(false));
 
             // The ccache file is created by the client that first stores a ticket in it.
             List<KeyValuePair<string, string>> variables =
@@ -99,45 +119,46 @@ public sealed class EnterObolKrb5Environment : PSCmdlet
                 new("KRB5_CONFIG", krb5Conf),
                 new("KRB5CCNAME", $"FILE:{Path.Combine(directory.FullName, "ccache")}"),
             ];
-            if (ServicePrincipal.Length > 0)
+            if (servicePrincipals.Count > 0)
             {
-                string path = WriteKeytab(directory.FullName, "service.keytab", ServicePrincipal);
+                string path = WriteKeytab(directory.FullName, "service.keytab", servicePrincipals);
                 variables.Add(new("KRB5_KTNAME", $"FILE:{path}"));
             }
-            if (ClientPrincipal.Length > 0)
+            if (clientPrincipals.Count > 0)
             {
-                string path = WriteKeytab(directory.FullName, "client.keytab", ClientPrincipal);
+                string path = WriteKeytab(directory.FullName, "client.keytab", clientPrincipals);
                 variables.Add(new("KRB5_CLIENT_KTNAME", $"FILE:{path}"));
             }
 
-            Krb5Environment? environment = Krb5Environment.TryEnter(
+            environment = Krb5Environment.TryEnter(
                 directory.FullName,
                 variables,
-                SetNativeEnvironment,
+                setNativeEnvironment,
                 Runspace.DefaultRunspace);
             if (environment is null)
             {
-                ThrowTerminatingError(AlreadyEnteredError());
+                cmdlet.ThrowTerminatingError(AlreadyEnteredError());
             }
-            entered = true;
-            WriteVerbose($"Entered the krb5 environment in '{directory.FullName}'");
+            cmdlet.WriteVerbose($"Entered the krb5 environment in '{directory.FullName}'");
 
-            if (!NoPrompt)
+            if (setPrompt)
             {
-                string label = Krb5EnvironmentPrompt.GetLabel(_kdcs.Select(k => k.Realm).ToArray());
-                environment!.Prompt = Krb5EnvironmentPrompt.Set(this, label);
+                string label = Krb5EnvironmentPrompt.GetLabel(kdcs.Select(k => k.Realm).ToArray());
+                environment.Prompt = Krb5EnvironmentPrompt.Set(cmdlet, label);
             }
         }
         finally
         {
-            if (!entered)
+            if (environment is null)
             {
                 directory.Delete(recursive: true);
             }
         }
+
+        return environment;
     }
 
-    private static string WriteKeytab(string directory, string name, ObolPrincipal[] principals)
+    private static string WriteKeytab(string directory, string name, IEnumerable<ObolPrincipal> principals)
     {
         KeytabBuilder keytab = new();
         keytab.Add(principals);
@@ -169,7 +190,7 @@ public sealed class EnterObolKrb5Environment : PSCmdlet
         }
     }
 
-    private static ErrorRecord AlreadyEnteredError() => new(
+    internal static ErrorRecord AlreadyEnteredError() => new(
         new InvalidOperationException(
             "A krb5 environment is already entered in this process, run Exit-ObolKrb5Environment first or set " +
             "the environment variables yourself with Export-ObolKrb5Config"),

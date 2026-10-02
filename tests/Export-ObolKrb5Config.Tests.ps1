@@ -66,6 +66,13 @@ Describe "Export-ObolKrb5Config" {
             Should-Throw -FullyQualifiedErrorId 'FileOpenFailed,Obol.Commands.ExportObolKrb5Config'
     }
 
+    It "Fails for a directory that does not exist with -Force" {
+        $missing = [Path]::Combine($TestDrive, 'missing', 'krb5.conf')
+
+        { $kdc | Export-ObolKrb5Config $missing -Force } |
+            Should-Throw -FullyQualifiedErrorId 'FileOpenFailed,Obol.Commands.ExportObolKrb5Config'
+    }
+
     It "Does not create a file when no KDC can be written" {
         $kdc | Stop-ObolKdc
 

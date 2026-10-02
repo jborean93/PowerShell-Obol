@@ -87,6 +87,23 @@ Describe "Exit-ObolKrb5Environment" {
         }
     }
 
+    It "Restores the variables if the directory cannot be removed when the runspace closes" -Skip:$IsWindows {
+        $ps = New-ObolPowerShell
+        $null = $ps.AddCommand('Enter-ObolKrb5Environment').AddParameter('Kdc', $kdc).Invoke()
+        $dir = [Path]::GetDirectoryName($env:KRB5_CONFIG)
+        [File]::SetUnixFileMode($dir, 'UserRead, UserExecute')
+        try {
+            $ps.Dispose()
+
+            [Environment]::GetEnvironmentVariable('KRB5_CONFIG') | Should-BeNull
+            Test-Path $dir | Should-BeTrue
+        }
+        finally {
+            [File]::SetUnixFileMode($dir, 'UserRead, UserWrite, UserExecute')
+            Remove-Item $dir -Recurse -Force
+        }
+    }
+
     It "Leaves a variable changed after entering" {
         Enter-ObolKrb5Environment $kdc
         $env:KRB5CCNAME = 'FILE:/changed'

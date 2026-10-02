@@ -36,9 +36,16 @@ public sealed class ExitObolKrb5Environment : PSCmdlet
             return;
         }
 
+        Exit(this, environment);
+    }
+
+    /// <summary>Restores the prompt and environment variables and removes the files of the environment.</summary>
+    /// <remarks>Must be called from the runspace that entered it, a failure to remove the files is written.</remarks>
+    internal static void Exit(PSCmdlet cmdlet, Krb5Environment environment)
+    {
         if (environment.Prompt is { } prompt)
         {
-            Krb5EnvironmentPrompt.Restore(this, prompt);
+            Krb5EnvironmentPrompt.Restore(cmdlet, prompt);
             environment.Prompt = null;
         }
 
@@ -50,12 +57,12 @@ public sealed class ExitObolKrb5Environment : PSCmdlet
         try
         {
             environment.RemoveDirectory();
-            WriteVerbose($"Exited the krb5 environment in '{environment.Directory}'");
+            cmdlet.WriteVerbose($"Exited the krb5 environment in '{environment.Directory}'");
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException)
         {
             // The variables are restored, only the files are left behind.
-            WriteError(new ErrorRecord(
+            cmdlet.WriteError(new ErrorRecord(
                 e,
                 "Krb5EnvironmentRemoveFailed",
                 ErrorCategory.WriteError,

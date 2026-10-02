@@ -206,6 +206,23 @@ Describe "Enter-ObolKrb5Environment" {
             prompt | Should-Be "$($PSStyle.Foreground.Cyan)[EXAMPLE.TEST]$($PSStyle.Reset) $prompt"
         }
 
+        It "Adds the realm when there is no prompt function" {
+            $function = ${function:global:prompt}
+            Remove-Item Function:\prompt
+            try {
+                Enter-ObolKrb5Environment $kdc
+
+                prompt | Should-Be '[EXAMPLE.TEST] PS> '
+
+                Exit-ObolKrb5Environment
+
+                Get-Command prompt -CommandType Function -ErrorAction Ignore | Should-BeNull
+            }
+            finally {
+                ${function:global:prompt} = $function
+            }
+        }
+
         It "Leaves the prompt alone with -NoPrompt" {
             $function = ${function:global:prompt}
 

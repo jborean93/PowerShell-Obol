@@ -54,52 +54,77 @@ public sealed class StartObolKdc : PSCmdlet
 
     protected override void EndProcessing()
     {
+        WriteObject(Start(
+            this,
+            Realm,
+            Address,
+            Port,
+            Transport,
+            MaxUdpReplySize,
+            CaseInsensitivePrincipal,
+            DomainSid,
+            Principal));
+    }
+
+    /// <summary>Starts a KDC with its principals, any failure is a terminating error.</summary>
+    /// <remarks>The KDC is listed in the current runspace and stopped when it closes.</remarks>
+    internal static ObolKdc Start(
+        PSCmdlet cmdlet,
+        string realm,
+        IPAddress address,
+        int port,
+        ObolKdcTransport transport,
+        int maxUdpReplySize,
+        bool caseInsensitivePrincipal,
+        string? domainSid,
+        IDictionary? principals)
+    {
         // Binding rejects undefined values but not 0, or a value created with [Enum]::ToObject.
-        if (Transport == 0 || (Transport & ~(ObolKdcTransport.Tcp | ObolKdcTransport.Udp)) != 0)
+        if (transport == 0 || (transport & ~(ObolKdcTransport.Tcp | ObolKdcTransport.Udp)) != 0)
         {
             ErrorRecord transportErr = new(
-                new ArgumentException($"Transport must be Tcp, Udp or both, got '{Transport}'"),
+                new ArgumentException($"Transport must be Tcp, Udp or both, got '{transport}'"),
                 "InvalidTransport",
                 ErrorCategory.InvalidArgument,
-                Transport);
-            ThrowTerminatingError(transportErr);
-            return;
+                transport);
+            cmdlet.ThrowTerminatingError(transportErr);
+            throw new UnreachableException();
         }
 
         // RFC 4120 6.1 allows these in a realm but the MIT KDC cannot host one, kdb5_util cannot create the database
         // and krb5.conf cannot hold a control character. Every principal name in such a realm also needs '\'
         // escapes, so they are rejected rather than supporting a realm no other KDC can serve.
-        if (Realm.AsSpan().IndexOfAny('/', '@', '\\') != -1 || Realm.Any(char.IsControl))
+        if (realm.AsSpan().IndexOfAny('/', '@', '\\') != -1 || realm.Any(char.IsControl))
         {
             ErrorRecord realmErr = new(
-                new ArgumentException($"The realm '{Realm}' must not contain '/', '@', '\\' or control characters"),
+                new ArgumentException($"The realm '{realm}' must not contain '/', '@', '\\' or control characters"),
                 "InvalidRealm",
                 ErrorCategory.InvalidArgument,
-                Realm);
-            ThrowTerminatingError(realmErr);
-            return;
+                realm);
+            cmdlet.ThrowTerminatingError(realmErr);
+            throw new UnreachableException();
         }
 
-        uint[]? domainSid = null;
-        if (DomainSid is not null && !PrincipalStore.TryParseDomainSid(DomainSid, out domainSid))
+        uint[]? domainSidValues = null;
+        if (domainSid is not null && !PrincipalStore.TryParseDomainSid(domainSid, out domainSidValues))
         {
             ErrorRecord sidErr = new(
                 new ArgumentException(
-                    $"The domain SID '{DomainSid}' must be in the form S-1-5-21-<a>-<b>-<c> where each value is a " +
+                    $"The domain SID '{domainSid}' must be in the form S-1-5-21-<a>-<b>-<c> where each value is a " +
                     "32-bit unsigned integer"),
                 "InvalidDomainSid",
                 ErrorCategory.InvalidArgument,
-                DomainSid);
-            ThrowTerminatingError(sidErr);
-            return;
+                domainSid);
+            cmdlet.ThrowTerminatingError(sidErr);
+            throw new UnreachableException();
         }
 
-        IPEndPoint endpoint = new(Address, Port);
+        IPEndPoint endpoint = new(address, port);
 
         ObolKdc kdc;
         try
         {
-            kdc = ObolKdc.Bind(Realm, endpoint, Transport, MaxUdpReplySize, CaseInsensitivePrincipal, domainSid);
+            kdc = ObolKdc.Bind(realm, endpoint, transport, maxUdpReplySize, caseInsensitivePrincipal, domainSidValues);
         }
         catch (SocketException e)
         {
@@ -109,18 +134,18 @@ public sealed class StartObolKdc : PSCmdlet
                 ErrorCategory.ResourceUnavailable,
                 endpoint)
             {
-                ErrorDetails = new($"Failed to start the KDC for '{Realm}' on {endpoint}: {e.Message}"),
+                ErrorDetails = new($"Failed to start the KDC for '{realm}' on {endpoint}: {e.Message}"),
             };
-            ThrowTerminatingError(err);
-            return;
+            cmdlet.ThrowTerminatingError(err);
+            throw new UnreachableException();
         }
 
         // The principals are added before the KDC answers requests so a client never sees the KDC without them.
-        if (Principal is not null)
+        if (principals is not null)
         {
             try
             {
-                AddPrincipals(kdc, Principal);
+                AddPrincipals(cmdlet, kdc, principals);
             }
             catch
             {
@@ -135,11 +160,11 @@ public sealed class StartObolKdc : PSCmdlet
             kdc.RegisterRunspace(runspace);
         }
 
-        WriteObject(kdc);
+        return kdc;
     }
 
     /// <summary>Creates the principals of -Principal, any failure is a terminating error.</summary>
-    private void AddPrincipals(ObolKdc kdc, IDictionary principals)
+    private static void AddPrincipals(PSCmdlet cmdlet, ObolKdc kdc, IDictionary principals)
     {
         foreach (DictionaryEntry entry in principals)
         {
@@ -162,24 +187,24 @@ public sealed class StartObolKdc : PSCmdlet
                     break;
 
                 default:
-                    ThrowInvalidPrincipal(name,
+                    ThrowInvalidPrincipal(cmdlet, name,
                         "The value must be null for random keys, a SecureString password, or an " +
                         $"ObolPrincipalSetting, got '{value.GetType().FullName}'");
                     return;
             }
 
-            NewObolPrincipal.Create(this, kdc, name, setting, out ErrorRecord? error);
+            NewObolPrincipal.Create(cmdlet, kdc, name, setting, out ErrorRecord? error);
             if (error is not null)
             {
-                ThrowTerminatingError(error);
+                cmdlet.ThrowTerminatingError(error);
             }
         }
     }
 
     [DoesNotReturn]
-    private void ThrowInvalidPrincipal(string name, string message)
+    private static void ThrowInvalidPrincipal(PSCmdlet cmdlet, string name, string message)
     {
-        ThrowTerminatingError(new ErrorRecord(
+        cmdlet.ThrowTerminatingError(new ErrorRecord(
             new ArgumentException($"Invalid principal '{name}' in -Principal: {message}"),
             "InvalidPrincipalArgument",
             ErrorCategory.InvalidArgument,

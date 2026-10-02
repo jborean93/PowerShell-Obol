@@ -21,9 +21,7 @@ public sealed class ObolKeytabEntry
         NameType = nameType;
 
         // Keytabs hold UTC seconds, shown in local time like ObolKdc.StartTime and file times.
-        Timestamp = timestamp.Kind == DateTimeKind.Utc
-            ? timestamp.ToLocalTime()
-            : DateTime.SpecifyKind(timestamp, DateTimeKind.Local);
+        Timestamp = timestamp.ToLocalTime();
         Kvno = kvno;
         EncryptionType = encryptionType;
         Key = key;

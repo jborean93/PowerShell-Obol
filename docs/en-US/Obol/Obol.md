@@ -89,3 +89,7 @@ Starts an Obol Kerberos KDC.
 ### [Stop-ObolKdc](Stop-ObolKdc.md)
 
 Stops an Obol KDC.
+
+### [Use-ObolKdc](Use-ObolKdc.md)
+
+Runs a scriptblock with an Obol KDC and the krb5 environment variables pointing at it.
