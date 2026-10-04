@@ -21,4 +21,7 @@ public enum ObolPrincipalFlag
 
     /// <summary>Tickets for the principal have the OK-AS-DELEGATE flag, clients can delegate to it.</summary>
     TrustedForDelegation = 1 << 2,
+
+    /// <summary>Tickets for the principal as a service have no PAC, TGTs always have one.</summary>
+    NoAuthDataRequired = 1 << 3,
 }

@@ -87,6 +87,26 @@ Describe "Exit-ObolKrb5Environment" {
         }
     }
 
+    It "Restores the variables if a file in the directory is open" -Skip:(-not $IsWindows) {
+        Enter-ObolKrb5Environment $kdc
+        $dir = [Path]::GetDirectoryName($env:KRB5_CONFIG)
+        # Windows cannot delete a file opened without FileShare.Delete.
+        $fs = [File]::Open($env:KRB5_CONFIG, 'Open', 'Read', 'Read')
+        try {
+            Exit-ObolKrb5Environment -ErrorVariable err -ErrorAction SilentlyContinue
+
+            $err.Count | Should-Be 1
+            $err[0].FullyQualifiedErrorId |
+                Should-Be 'Krb5EnvironmentRemoveFailed,Obol.Commands.ExitObolKrb5Environment'
+            $err[0].TargetObject | Should-Be $dir
+            [Environment]::GetEnvironmentVariable('KRB5_CONFIG') | Should-BeNull
+        }
+        finally {
+            $fs.Dispose()
+            Remove-Item $dir -Recurse -Force
+        }
+    }
+
     It "Restores the variables if the directory cannot be removed when the runspace closes" -Skip:$IsWindows {
         $ps = New-ObolPowerShell
         $null = $ps.AddCommand('Enter-ObolKrb5Environment').AddParameter('Kdc', $kdc).Invoke()

@@ -128,13 +128,24 @@ public sealed class StartObolKdc : PSCmdlet
         }
         catch (SocketException e)
         {
+            string message = $"Failed to start the KDC for '{realm}' on {endpoint}: {e.Message}";
+            // Windows allows the same port on another loopback address unless the holder is an exclusive wildcard
+            // socket, which fails with access denied rather than address in use.
+            if (OperatingSystem.IsWindows()
+                && e.SocketErrorCode == SocketError.AddressAlreadyInUse
+                && address.AddressFamily == AddressFamily.InterNetwork
+                && IPAddress.IsLoopback(address))
+            {
+                message += " Use -Address with another 127.0.0.x address where the port is free, such as 127.0.0.2.";
+            }
+
             ErrorRecord err = new(
                 e,
                 "KdcBindFailed",
                 ErrorCategory.ResourceUnavailable,
                 endpoint)
             {
-                ErrorDetails = new($"Failed to start the KDC for '{realm}' on {endpoint}: {e.Message}"),
+                ErrorDetails = new(message),
             };
             cmdlet.ThrowTerminatingError(err);
             throw new UnreachableException();

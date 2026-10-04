@@ -2,22 +2,20 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using System.Management.Automation;
 using System.Management.Automation.Language;
 using System.Net;
-using Obol.Protocol;
 
 namespace Obol.Commands;
 
-[Cmdlet(
-    VerbsOther.Use, "ObolKdc",
-    DefaultParameterSetName = StartParameterSet
-)]
-public sealed class UseObolKdc : PSCmdlet
+/// <summary>
+/// The parameters and scriptblock handling shared by the Use-Obol*Environment cmdlets, which start a KDC or use
+/// existing ones, configure Kerberos to use them while a scriptblock runs and then remove that configuration.
+/// </summary>
+public abstract class UseObolEnvironmentCommandBase : PSCmdlet
 {
-    private const string StartParameterSet = "Start";
-    private const string KdcParameterSet = "Kdc";
+    protected const string StartParameterSet = "Start";
+    protected const string KdcParameterSet = "Kdc";
 
     private readonly List<ObolKdc> _kdcs = [];
 
@@ -55,10 +53,6 @@ public sealed class UseObolKdc : PSCmdlet
     public IPAddress Address { get; set; } = IPAddress.Loopback;
 
     [Parameter(ParameterSetName = StartParameterSet)]
-    [ValidateRange(0, IPEndPoint.MaxPort)]
-    public int Port { get; set; }
-
-    [Parameter(ParameterSetName = StartParameterSet)]
     public ObolKdcTransport Transport { get; set; } = ObolKdcTransport.Tcp | ObolKdcTransport.Udp;
 
     [Parameter(ParameterSetName = StartParameterSet)]
@@ -77,42 +71,28 @@ public sealed class UseObolKdc : PSCmdlet
     public IDictionary? Principal { get; set; }
 
     [Parameter]
-    public ObolKrb5Provider Provider { get; set; } = ObolKrb5Provider.Default;
-
-    [Parameter]
-    [ValidateNotNullOrEmpty]
-    public string[] ServicePrincipal { get; set; } = [];
-
-    [Parameter]
-    [ValidateNotNullOrEmpty]
-    public string[] ClientPrincipal { get; set; } = [];
-
-    [Parameter]
-    public SwitchParameter SetNativeEnvironment { get; set; }
-
-    [Parameter]
     public SwitchParameter NoNewScope { get; set; }
 
-    protected override void BeginProcessing()
-    {
-        if (Krb5Config.CheckProvider(Provider) is ErrorRecord error)
-        {
-            ThrowTerminatingError(error);
-        }
+    /// <summary>The KDCs to use, the ones from -Kdc or the one started with -Realm.</summary>
+    protected IReadOnlyList<ObolKdc> Kdcs => _kdcs;
 
-        // Checked before a KDC is started, Enter checks it again.
-        if (Krb5Environment.Current is not null)
-        {
-            ThrowTerminatingError(EnterObolKrb5Environment.AlreadyEnteredError());
-        }
-    }
+    /// <summary>The port a KDC started with -Realm listens on, 0 for a random port.</summary>
+    protected abstract int StartPort { get; }
+
+    /// <summary>Checks a KDC can be used, from -Kdc or after it was started with -Realm.</summary>
+    /// <returns>The error to throw, or null if the KDC can be used.</returns>
+    protected abstract ErrorRecord? CheckKdc(ObolKdc kdc);
+
+    /// <summary>Configures Kerberos for <see cref="Kdcs"/>, runs the scriptblock with <see cref="Invoke"/> and then
+    /// removes the configuration, even when the scriptblock fails.</summary>
+    protected abstract void InvokeWithKdcs(ScriptBlock scriptBlock);
 
     protected override void ProcessRecord()
     {
         // The scriptblock only runs once all KDCs are received, a KDC that cannot be used stops it from running.
         foreach (ObolKdc kdc in Kdc)
         {
-            if (Krb5Config.CheckKdc(kdc) is ErrorRecord error)
+            if (CheckKdc(kdc) is ErrorRecord error)
             {
                 ThrowTerminatingError(error);
             }
@@ -133,7 +113,7 @@ public sealed class UseObolKdc : PSCmdlet
                     this,
                     Realm,
                     Address,
-                    Port,
+                    StartPort,
                     Transport,
                     MaxUdpReplySize,
                     CaseInsensitivePrincipal,
@@ -142,7 +122,7 @@ public sealed class UseObolKdc : PSCmdlet
                 _kdcs.Add(started);
 
                 // Checked after starting as a realm Start-ObolKdc accepts may not fit in a krb5.conf.
-                if (Krb5Config.CheckKdc(started) is ErrorRecord error)
+                if (CheckKdc(started) is ErrorRecord error)
                 {
                     ThrowTerminatingError(error);
                 }
@@ -156,26 +136,7 @@ public sealed class UseObolKdc : PSCmdlet
                     null));
             }
 
-            List<ObolPrincipal> service = FindPrincipals(ServicePrincipal);
-            List<ObolPrincipal> client = FindPrincipals(ClientPrincipal);
-
-            // The prompt is not shown while the scriptblock runs, so it is left alone.
-            Krb5Environment environment = EnterObolKrb5Environment.Enter(
-                this,
-                _kdcs,
-                Provider,
-                service,
-                client,
-                SetNativeEnvironment,
-                setPrompt: false);
-            try
-            {
-                Invoke(ScriptBlock);
-            }
-            finally
-            {
-                ExitObolKrb5Environment.Exit(this, environment);
-            }
+            InvokeWithKdcs(ScriptBlock);
         }
         finally
         {
@@ -184,7 +145,7 @@ public sealed class UseObolKdc : PSCmdlet
     }
 
     /// <summary>Runs the scriptblock with the KDCs as arguments, like the call or dot-source operator.</summary>
-    private void Invoke(ScriptBlock scriptBlock)
+    protected void Invoke(ScriptBlock scriptBlock)
     {
         // The scriptblock is copied without its session state affinity, so -NoNewScope dot-sources it into the
         // caller's scope. Each KDC is a separate argument. The parameters of the wrapper are not set in the caller's
@@ -248,37 +209,5 @@ public sealed class UseObolKdc : PSCmdlet
             processBlock: null,
             endBlock: end,
             dynamicParamBlock: null).GetScriptBlock();
-    }
-
-    /// <summary>Finds principals by name, a name without a realm is in the realm of the first KDC.</summary>
-    private List<ObolPrincipal> FindPrincipals(string[] names)
-    {
-        List<ObolPrincipal> principals = [];
-        foreach (string name in names)
-        {
-            if (!PrincipalName.TryParse(name, out string[]? components, out string? realm, out string? parseError))
-            {
-                ThrowTerminatingError(new ErrorRecord(
-                    new ArgumentException($"Invalid principal name '{name}': {parseError}"),
-                    "InvalidPrincipalName",
-                    ErrorCategory.InvalidArgument,
-                    name));
-            }
-
-            realm ??= _kdcs[0].Realm;
-            ObolKdc? kdc = _kdcs.FirstOrDefault(k => string.Equals(k.Realm, realm, StringComparison.Ordinal));
-            ObolPrincipal? principal = kdc?.Store.Find(components);
-            if (principal is null)
-            {
-                ThrowTerminatingError(new ErrorRecord(
-                    new ItemNotFoundException($"The principal '{PrincipalName.Unparse(components)}@{realm}' does " +
-                        "not exist"),
-                    "PrincipalNotFound",
-                    ErrorCategory.ObjectNotFound,
-                    name));
-            }
-            principals.Add(principal);
-        }
-        return principals;
     }
 }

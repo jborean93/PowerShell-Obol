@@ -19,6 +19,7 @@ internal sealed class KdcPrincipal
     private const uint UserTrustedForDelegation = 0x00002000;
     private const uint UserNotDelegated = 0x00004000;
     private const uint UserDontRequirePreauth = 0x00010000;
+    private const uint UserNoAuthDataRequired = 0x00080000;
 
     public KdcPrincipal(ObolPrincipal principal)
     {
@@ -89,6 +90,10 @@ internal sealed class KdcPrincipal
         if (State.Flags.HasFlag(ObolPrincipalFlag.TrustedForDelegation))
         {
             uac |= UserTrustedForDelegation;
+        }
+        if (State.Flags.HasFlag(ObolPrincipalFlag.NoAuthDataRequired))
+        {
+            uac |= UserNoAuthDataRequired;
         }
 
         return new PrivilegedAttributeCertificate

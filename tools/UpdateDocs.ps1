@@ -184,7 +184,7 @@ $help = foreach ($cmd in Get-Command -Module $module.Name) {
     $cmdHelp
 }
 
-$help | Export-MarkdownCommandHelp -OutputFolder $DocsPath -Force | Out-Null
+$exported = $help | Export-MarkdownCommandHelp -OutputFolder $DocsPath -Force
 
 $moduleFile = [Path]::Combine($moduleDocs, "$($module.Name).md")
 $moduleFileParams = @{
@@ -199,4 +199,14 @@ Update-MarkdownModuleFile @moduleFileParams | Out-Null
 # with a blank line, neither can be controlled so fix up the text.
 $content = [File]::ReadAllText($moduleFile)
 $content = $content -replace '(?m)^ms\.date: [^\r\n]*', "ms.date: ''"
-[File]::WriteAllText($moduleFile, $content.TrimEnd() + [Environment]::NewLine)
+[File]::WriteAllText($moduleFile, $content.TrimEnd() + "`n")
+
+# PlatyPS writes the platform newline, CRLF on Windows, and keeps the line
+# endings of text it reads back so a page can end up mixed. The repo uses LF.
+foreach ($path in @($exported.FullName) + $moduleFile) {
+    $content = [File]::ReadAllText($path)
+    $lf = $content -replace '\r\n', "`n"
+    if ($lf -cne $content) {
+        [File]::WriteAllText($path, $lf)
+    }
+}

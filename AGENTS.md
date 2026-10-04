@@ -137,7 +137,8 @@ signed with Azure Trusted Signing and published to the PowerShell Gallery.
 - Keep lines to 120 characters or fewer, including doc comments and test
   data. Nothing enforces it, so check with
   `awk 'length > 120' $(git ls-files '*.cs')` before finishing.
-- Line endings are LF everywhere (`.gitattributes` sets `text=auto`). Trim
+- Line endings are LF everywhere (`.gitattributes` sets `text=auto eol=lf`, so a Windows
+  checkout is LF too, and `.editorconfig` sets `end_of_line = lf`). Trim
   trailing whitespace and end files with a newline.
 - `.editorconfig` raises a chosen set of IDE rules to warnings, which are
   errors in `Release` and CI builds (`TreatWarningsAsErrors`). Run

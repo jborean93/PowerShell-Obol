@@ -18,6 +18,14 @@ PowerShell module that runs a Kerberos KDC endpoint based on Kerberos.NET.
 
 ## Obol Cmdlets
 
+### [Add-ObolSspiKdc](Add-ObolSspiKdc.md)
+
+Points the Windows Kerberos SSP at a KDC for a realm, for the current thread or the whole machine.
+
+### [Clear-ObolSspiKdc](Clear-ObolSspiKdc.md)
+
+Removes the KDCs Obol pointed the Windows Kerberos SSP at, for the whole process or the whole machine.
+
 ### [ConvertFrom-ObolKeytab](ConvertFrom-ObolKeytab.md)
 
 Converts the bytes of a keytab to keytab entries.
@@ -38,9 +46,17 @@ Converts a principal or account name to the salt its keys are derived from a pas
 
 Points the krb5 environment variables of the current process at Obol KDCs.
 
+### [Enter-ObolSspiEnvironment](Enter-ObolSspiEnvironment.md)
+
+Registers Obol KDCs with Windows Kerberos so SSPI authentication uses them.
+
 ### [Exit-ObolKrb5Environment](Exit-ObolKrb5Environment.md)
 
 Restores the krb5 environment variables changed by Enter-ObolKrb5Environment.
+
+### [Exit-ObolSspiEnvironment](Exit-ObolSspiEnvironment.md)
+
+Removes the KDCs registered with Windows Kerberos by Enter-ObolSspiEnvironment.
 
 ### [Export-ObolKeytab](Export-ObolKeytab.md)
 
@@ -57,6 +73,10 @@ Gets the Obol KDCs running in the current runspace.
 ### [Get-ObolPrincipal](Get-ObolPrincipal.md)
 
 Gets the principals of Obol KDCs.
+
+### [Get-ObolSspiKdc](Get-ObolSspiKdc.md)
+
+Lists the KDCs Obol has pointed the Windows Kerberos SSP at, for the current thread or the whole machine.
 
 ### [Import-ObolKeytab](Import-ObolKeytab.md)
 
@@ -90,6 +110,10 @@ Starts an Obol Kerberos KDC.
 
 Stops an Obol KDC.
 
-### [Use-ObolKdc](Use-ObolKdc.md)
+### [Use-ObolKrb5Environment](Use-ObolKrb5Environment.md)
 
 Runs a scriptblock with an Obol KDC and the krb5 environment variables pointing at it.
+
+### [Use-ObolSspiEnvironment](Use-ObolSspiEnvironment.md)
+
+Runs a scriptblock with an Obol KDC registered with Windows Kerberos.

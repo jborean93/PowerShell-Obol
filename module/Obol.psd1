@@ -71,16 +71,21 @@
 
     # Cmdlets to export from this module, for best performance, do not use wildcards and do not delete the entry, use an empty array if there are no cmdlets to export.
     CmdletsToExport = @(
+        'Add-ObolSspiKdc'
+        'Clear-ObolSspiKdc'
         'ConvertFrom-ObolKeytab'
         'ConvertTo-ObolKeytab'
         'ConvertTo-ObolKrb5Config'
         'ConvertTo-ObolSalt'
         'Enter-ObolKrb5Environment'
+        'Enter-ObolSspiEnvironment'
         'Exit-ObolKrb5Environment'
+        'Exit-ObolSspiEnvironment'
         'Export-ObolKeytab'
         'Export-ObolKrb5Config'
         'Get-ObolKdc'
         'Get-ObolPrincipal'
+        'Get-ObolSspiKdc'
         'Import-ObolKeytab'
         'New-ObolKeytabEntry'
         'New-ObolPrincipal'
@@ -89,7 +94,8 @@
         'Set-ObolPrincipal'
         'Start-ObolKdc'
         'Stop-ObolKdc'
-        'Use-ObolKdc'
+        'Use-ObolKrb5Environment'
+        'Use-ObolSspiEnvironment'
     )
 
     # Variables to export from this module

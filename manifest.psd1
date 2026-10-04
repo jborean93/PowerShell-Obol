@@ -15,5 +15,10 @@
             RequiredVersion = '1.0.3'
         }
     )
-    TestRequirements = @()
+    TestRequirements = @(
+        @{
+            ModuleName = 'PSPrivilege'
+            RequiredVersion = '0.2.0'
+        }
+    )
 }

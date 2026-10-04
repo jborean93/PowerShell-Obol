@@ -180,7 +180,7 @@ Describe "New-ObolPrincipal" {
         $actual | Should-BeNull
         $err.Count | Should-Be 1
         $err[0].FullyQualifiedErrorId | Should-Be 'InvalidFlag,Obol.Commands.NewObolPrincipal'
-        [string]$err[0] | Should-Be "Flag value 32768 contains values that are not supported, valid values are None, DoesNotRequirePreAuth, NotDelegated, TrustedForDelegation"
+        [string]$err[0] | Should-Be "Flag value 32768 contains values that are not supported, valid values are None, DoesNotRequirePreAuth, NotDelegated, TrustedForDelegation, NoAuthDataRequired"
     }
 
     It "Fails with an undefined flag in -Setting" {

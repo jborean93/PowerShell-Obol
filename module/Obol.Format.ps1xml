@@ -101,5 +101,37 @@
         </TableRowEntries>
       </TableControl>
     </View>
+    <View>
+      <Name>Obol.ObolSspiKdc</Name>
+      <ViewSelectedBy>
+        <TypeName>Obol.ObolSspiKdc</TypeName>
+      </ViewSelectedBy>
+      <TableControl>
+        <TableHeaders>
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+          <TableColumnHeader />
+        </TableHeaders>
+        <TableRowEntries>
+          <TableRowEntry>
+            <TableColumnItems>
+              <TableColumnItem>
+                <PropertyName>Scope</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>Realm</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>KdcAddress</PropertyName>
+              </TableColumnItem>
+              <TableColumnItem>
+                <PropertyName>KdcName</PropertyName>
+              </TableColumnItem>
+            </TableColumnItems>
+          </TableRowEntry>
+        </TableRowEntries>
+      </TableControl>
+    </View>
   </ViewDefinitions>
 </Configuration>

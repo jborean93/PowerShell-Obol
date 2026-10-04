@@ -17,13 +17,9 @@ internal static class Krb5Config
     /// <returns>The error to write, or null if the KDC can be used.</returns>
     public static ErrorRecord? CheckKdc(ObolKdc kdc)
     {
-        if (kdc.State != ObolKdcState.Running)
+        if (CheckRunning(kdc) is ErrorRecord error)
         {
-            return new ErrorRecord(
-                new InvalidOperationException($"The KDC for '{kdc.Realm}' is {kdc.State}"),
-                "KdcNotRunning",
-                ErrorCategory.InvalidOperation,
-                kdc);
+            return error;
         }
 
         // A relation name ends at whitespace or '=', the other characters would be read as part of the syntax.
@@ -39,6 +35,22 @@ internal static class Krb5Config
         }
 
         return null;
+    }
+
+    /// <summary>Checks the KDC is running.</summary>
+    /// <returns>The error to write, or null if the KDC is running.</returns>
+    public static ErrorRecord? CheckRunning(ObolKdc kdc)
+    {
+        if (kdc.State == ObolKdcState.Running)
+        {
+            return null;
+        }
+
+        return new ErrorRecord(
+            new InvalidOperationException($"The KDC for '{kdc.Realm}' is {kdc.State}"),
+            "KdcNotRunning",
+            ErrorCategory.InvalidOperation,
+            kdc);
     }
 
     /// <summary>The provider Default stands for on the current platform, Heimdal on macOS and MIT elsewhere.</summary>
@@ -101,7 +113,8 @@ internal static class Krb5Config
             sb.Append($"    {realm.Key} = {{\n");
             foreach (ObolKdc kdc in realm)
             {
-                sb.Append($"        kdc = {GetTransportPrefix(kdc, provider)}{GetKdcAddress(kdc.Endpoint)}\n");
+                IPEndPoint endpoint = new(GetClientAddress(kdc.Endpoint.Address), kdc.Endpoint.Port);
+                sb.Append($"        kdc = {GetTransportPrefix(kdc, provider)}{endpoint}\n");
             }
             sb.Append("    }\n");
         }
@@ -144,18 +157,16 @@ internal static class Krb5Config
     }
 
     /// <summary>The address clients use to reach the KDC, a loopback address if it listens on all addresses.</summary>
-    private static string GetKdcAddress(IPEndPoint endpoint)
+    public static IPAddress GetClientAddress(IPAddress address)
     {
-        IPAddress address = endpoint.Address;
         if (address.Equals(IPAddress.Any))
         {
-            address = IPAddress.Loopback;
+            return IPAddress.Loopback;
         }
-        else if (address.Equals(IPAddress.IPv6Any))
+        if (address.Equals(IPAddress.IPv6Any))
         {
-            address = IPAddress.IPv6Loopback;
+            return IPAddress.IPv6Loopback;
         }
-
-        return new IPEndPoint(address, endpoint.Port).ToString();
+        return address;
     }
 }

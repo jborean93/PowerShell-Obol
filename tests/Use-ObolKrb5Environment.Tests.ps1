@@ -7,7 +7,7 @@ BeforeAll {
     $variableNames = 'KRB5_CONFIG', 'KRB5CCNAME', 'KRB5_KTNAME', 'KRB5_CLIENT_KTNAME'
 }
 
-Describe "Use-ObolKdc" {
+Describe "Use-ObolKrb5Environment" {
     BeforeEach {
         $previous = @{}
         foreach ($name in $variableNames) {
@@ -32,7 +32,7 @@ Describe "Use-ObolKdc" {
 
     Context "Started KDC" {
         It "Runs the scriptblock with a KDC and the environment" {
-            $actual = Use-ObolKdc EXAMPLE.TEST -Principal @{ user = $null } {
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST -Principal @{ user = $null } {
                 param ($kdc)
 
                 [PSCustomObject]@{
@@ -53,7 +53,7 @@ Describe "Use-ObolKdc" {
         }
 
         It "Stops the KDC and exits the environment after" {
-            $config = Use-ObolKdc EXAMPLE.TEST { $env:KRB5_CONFIG }
+            $config = Use-ObolKrb5Environment EXAMPLE.TEST { $env:KRB5_CONFIG }
 
             Get-ObolKdc | Should-BeNull
             [Environment]::GetEnvironmentVariable('KRB5_CONFIG') | Should-BeNull
@@ -61,14 +61,14 @@ Describe "Use-ObolKdc" {
         }
 
         It "Passes the KDC parameters to the KDC" {
-            $actual = Use-ObolKdc EXAMPLE.TEST -Transport Tcp -CaseInsensitivePrincipal { $args[0] }
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST -Transport Tcp -CaseInsensitivePrincipal { $args[0] }
 
             $actual.Transport | Should-Be ([Obol.ObolKdcTransport]::Tcp)
             $actual.CaseInsensitivePrincipal | Should-BeTrue
         }
 
         It "Writes the krb5.conf for -Provider" {
-            $actual = Use-ObolKdc EXAMPLE.TEST -Transport Tcp -Provider Heimdal {
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST -Transport Tcp -Provider Heimdal {
                 [File]::ReadAllText($env:KRB5_CONFIG) -eq (ConvertTo-ObolKrb5Config $args[0] -Provider Heimdal)
             }
 
@@ -78,16 +78,16 @@ Describe "Use-ObolKdc" {
         It "Fails if the KDC cannot start" {
             $script:ran = $false
 
-            { Use-ObolKdc 'BAD/REALM' { $script:ran = $true } } |
-                Should-Throw -FullyQualifiedErrorId 'InvalidRealm,Obol.Commands.UseObolKdc'
+            { Use-ObolKrb5Environment 'BAD/REALM' { $script:ran = $true } } |
+                Should-Throw -FullyQualifiedErrorId 'InvalidRealm,Obol.Commands.UseObolKrb5Environment'
 
             $script:ran | Should-BeFalse
             [Environment]::GetEnvironmentVariable('KRB5_CONFIG') | Should-BeNull
         }
 
         It "Fails for a realm that cannot be written in a krb5.conf" {
-            { Use-ObolKdc 'BAD]REALM' { 'ran' } } |
-                Should-Throw -FullyQualifiedErrorId 'InvalidKrb5ConfigRealm,Obol.Commands.UseObolKdc'
+            { Use-ObolKrb5Environment 'BAD]REALM' { 'ran' } } |
+                Should-Throw -FullyQualifiedErrorId 'InvalidKrb5ConfigRealm,Obol.Commands.UseObolKrb5Environment'
 
             Get-ObolKdc | Should-BeNull
         }
@@ -100,7 +100,7 @@ Describe "Use-ObolKdc" {
         }
 
         It "Passes each KDC as an argument" {
-            $actual = Use-ObolKdc -Kdc $kdc, $other {
+            $actual = Use-ObolKrb5Environment -Kdc $kdc, $other {
                 param ($first, $second)
 
                 $first.Realm
@@ -112,7 +112,7 @@ Describe "Use-ObolKdc" {
         }
 
         It "Uses KDCs from the pipeline and leaves them running" {
-            $actual = $kdc, $other | Use-ObolKdc { $args.Count }
+            $actual = $kdc, $other | Use-ObolKrb5Environment { $args.Count }
 
             $actual | Should-Be 2
             $kdc.State | Should-Be Running
@@ -120,22 +120,22 @@ Describe "Use-ObolKdc" {
         }
 
         It "Fails if no KDC is received from the pipeline" {
-            { @() | Use-ObolKdc { 'ran' } } | Should-Throw -FullyQualifiedErrorId 'NoKdc,Obol.Commands.UseObolKdc'
+            { @() | Use-ObolKrb5Environment { 'ran' } } | Should-Throw -FullyQualifiedErrorId 'NoKdc,Obol.Commands.UseObolKrb5Environment'
         }
 
         It "Fails for an undefined provider" {
             $provider = [Enum]::ToObject([Obol.ObolKrb5Provider], 99)
 
-            { Use-ObolKdc -Kdc $kdc -Provider $provider { 'ran' } } |
-                Should-Throw -FullyQualifiedErrorId 'InvalidProvider,Obol.Commands.UseObolKdc'
+            { Use-ObolKrb5Environment -Kdc $kdc -Provider $provider { 'ran' } } |
+                Should-Throw -FullyQualifiedErrorId 'InvalidProvider,Obol.Commands.UseObolKrb5Environment'
         }
 
         It "Fails for a stopped KDC without running the scriptblock" {
             Stop-ObolKdc $other
             $script:ran = $false
 
-            { $kdc, $other | Use-ObolKdc { $script:ran = $true } } |
-                Should-Throw -FullyQualifiedErrorId 'KdcNotRunning,Obol.Commands.UseObolKdc'
+            { $kdc, $other | Use-ObolKrb5Environment { $script:ran = $true } } |
+                Should-Throw -FullyQualifiedErrorId 'KdcNotRunning,Obol.Commands.UseObolKrb5Environment'
 
             $script:ran | Should-BeFalse
         }
@@ -146,7 +146,7 @@ Describe "Use-ObolKdc" {
                 ServicePrincipal = 'HTTP/web.example.test'
                 ClientPrincipal = 'user', 'user@OTHER.TEST'
             }
-            $actual = Use-ObolKdc @params {
+            $actual = Use-ObolKrb5Environment @params {
                 [PSCustomObject]@{
                     Service = Read-TestKeytab ($env:KRB5_KTNAME -replace '^FILE:')
                     Client = Read-TestKeytab ($env:KRB5_CLIENT_KTNAME -replace '^FILE:')
@@ -166,23 +166,23 @@ Describe "Use-ObolKdc" {
 
             $script:ran = $false
 
-            { Use-ObolKdc -Kdc $kdc -ClientPrincipal $Name { $script:ran = $true } } |
-                Should-Throw -FullyQualifiedErrorId 'PrincipalNotFound,Obol.Commands.UseObolKdc'
+            { Use-ObolKrb5Environment -Kdc $kdc -ClientPrincipal $Name { $script:ran = $true } } |
+                Should-Throw -FullyQualifiedErrorId 'PrincipalNotFound,Obol.Commands.UseObolKrb5Environment'
 
             $script:ran | Should-BeFalse
             [Environment]::GetEnvironmentVariable('KRB5_CONFIG') | Should-BeNull
         }
 
         It "Fails for an invalid principal name" {
-            { Use-ObolKdc -Kdc $kdc -ServicePrincipal 'a@b@c' { 'ran' } } |
-                Should-Throw -FullyQualifiedErrorId 'InvalidPrincipalName,Obol.Commands.UseObolKdc'
+            { Use-ObolKrb5Environment -Kdc $kdc -ServicePrincipal 'a@b@c' { 'ran' } } |
+                Should-Throw -FullyQualifiedErrorId 'InvalidPrincipalName,Obol.Commands.UseObolKrb5Environment'
         }
 
         It "Fails if an environment is already entered" {
             Enter-ObolKrb5Environment $kdc
 
-            { Use-ObolKdc NEW.TEST { 'ran' } } |
-                Should-Throw -FullyQualifiedErrorId 'Krb5EnvironmentAlreadyEntered,Obol.Commands.UseObolKdc'
+            { Use-ObolKrb5Environment NEW.TEST { 'ran' } } |
+                Should-Throw -FullyQualifiedErrorId 'Krb5EnvironmentAlreadyEntered,Obol.Commands.UseObolKrb5Environment'
 
             Get-ObolKdc | Where-Object Realm -EQ NEW.TEST | Should-BeNull
         }
@@ -190,13 +190,13 @@ Describe "Use-ObolKdc" {
         It "Leaves the prompt alone" {
             $prompt = ${function:global:prompt}
 
-            $actual = Use-ObolKdc -Kdc $kdc { [object]::ReferenceEquals(${function:global:prompt}, $prompt) }
+            $actual = Use-ObolKrb5Environment -Kdc $kdc { [object]::ReferenceEquals(${function:global:prompt}, $prompt) }
 
             $actual | Should-BeTrue
         }
 
         It "Sets the native environment with -SetNativeEnvironment" -Skip:$IsWindows {
-            $actual = Use-ObolKdc -Kdc $kdc -SetNativeEnvironment {
+            $actual = Use-ObolKrb5Environment -Kdc $kdc -SetNativeEnvironment {
                 (Get-NativeEnvironmentVariable KRB5_CONFIG) -eq $env:KRB5_CONFIG
             }
 
@@ -206,7 +206,7 @@ Describe "Use-ObolKdc" {
 
     Context "Scriptblock invocation" {
         It "Writes output as it is received" {
-            $actual = Use-ObolKdc EXAMPLE.TEST { 1; 2; 3 } | Select-Object -First 2
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST { 1; 2; 3 } | Select-Object -First 2
 
             $actual | Should-BeCollection @(1, 2)
             Get-ObolKdc | Should-BeNull
@@ -215,7 +215,7 @@ Describe "Use-ObolKdc" {
         It "Runs in a new scope" {
             $value = 'caller'
 
-            Use-ObolKdc EXAMPLE.TEST { $value = 'inner' }
+            Use-ObolKrb5Environment EXAMPLE.TEST { $value = 'inner' }
 
             $value | Should-Be caller
         }
@@ -223,7 +223,7 @@ Describe "Use-ObolKdc" {
         It "Runs in the caller's scope with -NoNewScope" {
             $value = 'caller'
 
-            Use-ObolKdc EXAMPLE.TEST { $value = 'inner' } -NoNewScope
+            Use-ObolKrb5Environment EXAMPLE.TEST { $value = 'inner' } -NoNewScope
 
             $value | Should-Be inner
         }
@@ -234,7 +234,7 @@ Describe "Use-ObolKdc" {
             }
             $value = 'caller'
 
-            Use-ObolKdc EXAMPLE.TEST (& $module { Get-TestScriptBlock }) -NoNewScope
+            Use-ObolKrb5Environment EXAMPLE.TEST (& $module { Get-TestScriptBlock }) -NoNewScope
 
             $value | Should-Be module
         }
@@ -249,7 +249,7 @@ Describe "Use-ObolKdc" {
                 clean { $script:cleaned = $true }
             }
 
-            $actual = Use-ObolKdc EXAMPLE.TEST $sb
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST $sb
 
             $actual | Should-BeCollection @('begin EXAMPLE.TEST', 'process', 'end')
             $script:cleaned | Should-BeTrue
@@ -261,7 +261,7 @@ Describe "Use-ObolKdc" {
                 $Kdc.Realm
             }
 
-            Use-ObolKdc EXAMPLE.TEST ${function:Get-TestRealm} | Should-Be EXAMPLE.TEST
+            Use-ObolKrb5Environment EXAMPLE.TEST ${function:Get-TestRealm} | Should-Be EXAMPLE.TEST
         }
 
         It "Sets `$MyInvocation to the line that called it with -NoNewScope:<NoNewScope>" -TestCases @(
@@ -272,7 +272,7 @@ Describe "Use-ObolKdc" {
 
             # Both on one line so the call operator gives the expected values.
             $p = @{ NoNewScope = $NoNewScope }
-            $expected = & { $MyInvocation }; $actual = Use-ObolKdc EXAMPLE.TEST { $MyInvocation } @p
+            $expected = & { $MyInvocation }; $actual = Use-ObolKrb5Environment EXAMPLE.TEST { $MyInvocation } @p
 
             $actual.ScriptLineNumber | Should-Be $expected.ScriptLineNumber
             $actual.ScriptName | Should-Be $expected.ScriptName
@@ -284,7 +284,7 @@ Describe "Use-ObolKdc" {
         It "Runs when called without a script position" {
             $ps = New-ObolPowerShell
             try {
-                $actual = $ps.AddCommand('Use-ObolKdc').
+                $actual = $ps.AddCommand('Use-ObolKrb5Environment').
                     AddParameter('Realm', 'EXAMPLE.TEST').
                     AddParameter('ScriptBlock', { $MyInvocation.ScriptLineNumber }).
                     Invoke()
@@ -298,13 +298,13 @@ Describe "Use-ObolKdc" {
         }
 
         It "Does not set its own variables in the caller's scope" {
-            Use-ObolKdc EXAMPLE.TEST { } -NoNewScope
+            Use-ObolKrb5Environment EXAMPLE.TEST { } -NoNewScope
 
             Get-Variable Strip, Kdc -Scope 0 -ErrorAction Ignore | Should-BeNull
         }
 
         It "Throws a terminating error from the scriptblock and cleans up" {
-            $err = { Use-ObolKdc EXAMPLE.TEST { throw 'failure' } } | Should-Throw
+            $err = { Use-ObolKrb5Environment EXAMPLE.TEST { throw 'failure' } } | Should-Throw
 
             $err.Exception.Message | Should-Be failure
             $err.InvocationInfo.Line | Should-BeLikeString "*throw 'failure'*"
@@ -316,7 +316,7 @@ Describe "Use-ObolKdc" {
             # common.ps1 sets Stop, which the scriptblock would follow.
             $ErrorActionPreference = 'Continue'
 
-            $actual = Use-ObolKdc EXAMPLE.TEST { Write-Error 'failure'; 'after' } -ErrorVariable err 2>$null
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST { Write-Error 'failure'; 'after' } -ErrorVariable err 2>$null
 
             $actual | Should-Be after
             $err.Count | Should-Be 1
@@ -326,20 +326,20 @@ Describe "Use-ObolKdc" {
         It "Uses the caller's `$ErrorActionPreference" {
             $ErrorActionPreference = 'Stop'
 
-            { Use-ObolKdc EXAMPLE.TEST { Write-Error 'failure'; 'after' } } |
+            { Use-ObolKrb5Environment EXAMPLE.TEST { Write-Error 'failure'; 'after' } } |
                 Should-Throw -ExceptionMessage failure
         }
 
         It "Does not apply -ErrorAction to the scriptblock" {
             $ErrorActionPreference = 'Continue'
 
-            $actual = Use-ObolKdc EXAMPLE.TEST { Write-Error 'failure'; 'after' } -ErrorAction Stop 2>$null
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST { Write-Error 'failure'; 'after' } -ErrorAction Stop 2>$null
 
             $actual | Should-Be after
         }
 
         It "Writes the other streams through the cmdlet" {
-            $actual = Use-ObolKdc EXAMPLE.TEST {
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST {
                 Write-Warning warning
                 Write-Information information
                 'output'
@@ -351,7 +351,7 @@ Describe "Use-ObolKdc" {
         }
 
         It "Redirects the streams of the scriptblock" {
-            $actual = Use-ObolKdc EXAMPLE.TEST { Write-Warning warning } 3>&1
+            $actual = Use-ObolKrb5Environment EXAMPLE.TEST { Write-Warning warning } 3>&1
 
             $actual.Message | Should-Be warning
         }
