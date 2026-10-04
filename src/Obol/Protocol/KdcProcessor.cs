@@ -21,8 +21,11 @@ internal sealed class KdcProcessor
     private const int AsReqTag = 10;
     private const int TgsReqTag = 12;
 
-    /// <summary>The RFC 3961 checksum types that are not keyed: CRC32, RSA-MD4, RSA-MD5 and SHA-1.</summary>
-    private static readonly int[] s_unkeyedChecksumTypes = [1, 2, 7, 14];
+    /// <summary>The RFC 3961 RSA-MD5 checksum type, Windows uses it for the TGS-REQ body checksum.</summary>
+    private const int RsaMd5ChecksumType = 7;
+
+    /// <summary>The other RFC 3961 checksum types that are not keyed: CRC32, RSA-MD4 and SHA-1.</summary>
+    private static readonly int[] s_unkeyedChecksumTypes = [1, 2, 14];
 
     private readonly PrincipalStore _store;
     private readonly TimeProvider _time;
@@ -186,8 +189,8 @@ internal sealed class KdcProcessor
             Addresses = body.Addresses,
             Nonce = body.Nonce,
             SupportedEncryptionTypes = service.EncodeSupportedEncryptionTypes(),
-            // Like AD the PAC is included unless the client asks for it not to be.
-            IncludePac = GetPacRequest(asReq) ?? true,
+            // Like AD the PAC is included unless the client asks for it not to be or the service does not want one.
+            IncludePac = (GetPacRequest(asReq) ?? true) && TakesPac(service),
             ReplyKey = replyKey,
             ReplyKeyUsage = KeyUsage.EncAsRepPart,
             // The salt used for the reply key, the client uses it instead of the default salt of the name it sent
@@ -331,14 +334,22 @@ internal sealed class KdcProcessor
             Addresses = addresses,
             Nonce = body.Nonce,
             SupportedEncryptionTypes = service.EncodeSupportedEncryptionTypes(),
-            IncludePac = GetPacRequest(tgsReq)
+            IncludePac = (GetPacRequest(tgsReq)
                 ?? tgt.AuthorizationData?.Any(a => a.Type == AuthorizationDataType.AdIfRelevant)
-                ?? false,
+                ?? false) && TakesPac(service),
             ReplyKey = replyKey,
             ReplyKeyUsage = replyKeyUsage,
             PaData = null,
         });
     }
+
+    /// <summary>Whether a ticket for the service can have a PAC.</summary>
+    /// <remarks>
+    /// MS-KILE 3.3.5.3 a service ticket has no PAC when the service has USER_NO_AUTH_DATA_REQUIRED, MIT's
+    /// no_auth_data_required. A TGT always has one, the krbtgt flag is ignored.
+    /// </remarks>
+    private static bool TakesPac(KdcPrincipal service)
+        => service.Principal.IsKrbtgt || !service.State.Flags.HasFlag(ObolPrincipalFlag.NoAuthDataRequired);
 
     /// <summary>Checks the protocol version and realm of a request.</summary>
     private void CheckRequest(int pvno, string? realm)
@@ -535,7 +546,7 @@ internal sealed class KdcProcessor
         return (tgt, authenticator);
     }
 
-    /// <summary>Validates the keyed checksum of the TGS-REQ body in the authenticator, RFC 4120 3.3.2.</summary>
+    /// <summary>Validates the checksum of the TGS-REQ body in the authenticator, RFC 4120 3.3.2.</summary>
     /// <remarks>
     /// The checksum stops the body from being changed, such as the service, as the TGT and authenticator can be
     /// replayed within the clock skew. It is computed over the body as the client encoded it.
@@ -548,13 +559,26 @@ internal sealed class KdcProcessor
                 "The authenticator has no checksum of the request body");
         }
 
-        // RFC 4120 3.3.2 a checksum that is not collision-proof gets KRB_AP_ERR_INAPP_CKSUM, 3.3.1 also requires a
-        // keyed checksum so the unkeyed RFC 3961 types are treated the same. Any other type not supported gets
+        // RFC 4120 3.3.2 and 5.2.7.1 only require the checksum to be collision-proof, it does not need a key as the
+        // authenticator is encrypted with the TGT session key. Windows sends an RSA-MD5 checksum whatever the
+        // session key type, MIT and Heimdal accept it too. Finding another body with the same MD5 needs a second
+        // preimage, not a collision, as the client built the body. The other unkeyed types get
+        // KRB_AP_ERR_INAPP_CKSUM, unlike MIT which accepts RSA-MD4 and SHA-1, and any other type not supported gets
         // KDC_ERR_SUMTYPE_NOSUPP.
+        if ((int)checksum.Type == RsaMd5ChecksumType)
+        {
+            byte[] hash = MD5.HashData(GetTgsReqBody(message).Span);
+            if (!CryptographicOperations.FixedTimeEquals(hash, checksum.Checksum.Span))
+            {
+                throw new KdcException(KerberosErrorCode.KRB_AP_ERR_MODIFIED,
+                    "The checksum of the request body is not valid");
+            }
+            return;
+        }
         if (s_unkeyedChecksumTypes.Contains((int)checksum.Type))
         {
             throw new KdcException(KerberosErrorCode.KRB_AP_ERR_INAPP_CKSUM,
-                $"The checksum type {(int)checksum.Type} of the request body is not a keyed collision-proof checksum");
+                $"The unkeyed checksum type {(int)checksum.Type} of the request body is not accepted");
         }
         if (checksum.Type is not (ChecksumType.HMAC_SHA1_96_AES128
             or ChecksumType.HMAC_SHA1_96_AES256

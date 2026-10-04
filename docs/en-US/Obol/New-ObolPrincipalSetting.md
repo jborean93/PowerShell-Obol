@@ -178,6 +178,7 @@ AcceptedValues:
 - DoesNotRequirePreAuth
 - NotDelegated
 - TrustedForDelegation
+- NoAuthDataRequired
 HelpMessage: ''
 ```
 

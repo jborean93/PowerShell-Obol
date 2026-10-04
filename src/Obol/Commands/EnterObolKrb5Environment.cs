@@ -143,8 +143,8 @@ public sealed class EnterObolKrb5Environment : PSCmdlet
 
             if (setPrompt)
             {
-                string label = Krb5EnvironmentPrompt.GetLabel(kdcs.Select(k => k.Realm).ToArray());
-                environment.Prompt = Krb5EnvironmentPrompt.Set(cmdlet, label);
+                string label = EnvironmentPrompt.GetLabel(kdcs.Select(k => k.Realm).ToArray());
+                environment.Prompt = EnvironmentPrompt.Set(cmdlet, label, "Cyan");
             }
         }
         finally

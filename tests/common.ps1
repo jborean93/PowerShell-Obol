@@ -163,12 +163,96 @@ public static string GetEnv(string name) => Marshal.PtrToStringUTF8(GetEnvPtr(na
     [ObolTests.Libc]::GetEnv($Name)
 }
 
+Function Invoke-AsLogonUser {
+    <#
+    .SYNOPSIS
+    Logs a user on (network logon), impersonates them on the current thread, runs the scriptblock, then reverts.
+
+    .DESCRIPTION
+    Windows only. Used to test code paths that depend on the caller's effective token, such as the SeTcbPrivilege
+    routes of the SSPI binding cache cmdlets. The scriptblock runs synchronously on the current thread so any cmdlet
+    in it runs under the impersonation. A network logon (type 3) is used, it carries the account's granted
+    privileges, an interactive logon token does not.
+
+    .OUTPUTS
+    The output of the scriptblock.
+    #>
+    param (
+        [Parameter(Mandatory)][string]$Username,
+        [Parameter(Mandatory)][string]$Password,
+        [Parameter(Mandatory)][scriptblock]$ScriptBlock
+    )
+
+    if (-not ('ObolTests.LogonHelper' -as [type])) {
+        Add-Type -Namespace ObolTests -Name LogonHelper -MemberDefinition @'
+[DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+private static extern bool LogonUserW(string user, string domain, string password, int type, int provider, out IntPtr token);
+
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool ImpersonateLoggedOnUser(IntPtr token);
+
+[DllImport("advapi32.dll", SetLastError = true)]
+private static extern bool RevertToSelf();
+
+[DllImport("kernel32.dll", SetLastError = true)]
+private static extern bool CloseHandle(IntPtr handle);
+
+public static IntPtr Logon(string user, string password) {
+    // LOGON32_LOGON_NETWORK (3), LOGON32_PROVIDER_DEFAULT (0).
+    if (!LogonUserW(user, ".", password, 3, 0, out IntPtr token))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "LogonUser failed");
+    return token;
+}
+
+public static void Impersonate(IntPtr token) {
+    if (!ImpersonateLoggedOnUser(token))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "ImpersonateLoggedOnUser failed");
+}
+
+public static void Revert() {
+    if (!RevertToSelf())
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "RevertToSelf failed");
+}
+
+public static void Close(IntPtr handle) { CloseHandle(handle); }
+'@
+    }
+
+    $token = [ObolTests.LogonHelper]::Logon($Username, $Password)
+    try {
+        [ObolTests.LogonHelper]::Impersonate($token)
+        try { & $ScriptBlock }
+        finally { [ObolTests.LogonHelper]::Revert() }
+    }
+    finally {
+        [ObolTests.LogonHelper]::Close($token)
+    }
+}
+
 Function New-ObolPowerShell {
     <#
     .SYNOPSIS
     Creates a PowerShell instance with its own runspace in this process that has the Obol module imported.
+
+    .DESCRIPTION
+    Without -ThreadOptions the instance owns its runspace and disposing it closes the runspace.
+
+    With -ThreadOptions the runspace is created with those options, used to test behaviour tied to the OS thread:
+    ReuseThread keeps every Invoke on the one thread, UseNewThread runs each Invoke on a fresh thread. The options
+    can only be set before the runspace opens, so the instance does not own it, dispose $ps.Runspace as well.
     #>
-    $ps = [PowerShell]::Create()
+    param ([System.Management.Automation.Runspaces.PSThreadOptions]$ThreadOptions)
+
+    if ($PSBoundParameters.ContainsKey('ThreadOptions')) {
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.ThreadOptions = $ThreadOptions
+        $runspace.Open()
+        $ps = [PowerShell]::Create($runspace)
+    }
+    else {
+        $ps = [PowerShell]::Create()
+    }
+
     $null = $ps.AddCommand('Import-Module').AddArgument(
         [Path]::Combine((Get-Module Obol).ModuleBase, 'Obol.psd1')).Invoke()
     $ps.Commands.Clear()

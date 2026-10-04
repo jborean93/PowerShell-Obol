@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using Kerberos.NET.Crypto;
 using Kerberos.NET.Entities;
@@ -135,6 +136,13 @@ public class KdcProcessorTests
         => ticket.AuthorizationData?.Any(a => a.Type == AuthorizationDataType.AdIfRelevant
             && KrbAuthorizationDataSequence.Decode(a.Data).AuthorizationData
                 .Any(i => i.Type == AuthorizationDataType.AdWin2kPac)) ?? false;
+
+    /// <summary>The unkeyed RSA-MD5 checksum of the body, like Windows sends.</summary>
+    private static KrbChecksum RsaMd5Checksum(KrbKdcReqBody body) => new()
+    {
+        Type = (ChecksumType)7,
+        Checksum = MD5.HashData(body.Encode().Span),
+    };
 
     /// <summary>Builds a TGS-REQ for a service with the TGT, the checksum covers the body unless set.</summary>
     private static KrbTgsReq NewTgsReq(
@@ -569,7 +577,7 @@ public class KdcProcessorTests
 
     [Test]
     [Arguments(1, KerberosErrorCode.KRB_AP_ERR_INAPP_CKSUM)]
-    [Arguments(7, KerberosErrorCode.KRB_AP_ERR_INAPP_CKSUM)]
+    [Arguments(2, KerberosErrorCode.KRB_AP_ERR_INAPP_CKSUM)]
     [Arguments(14, KerberosErrorCode.KRB_AP_ERR_INAPP_CKSUM)]
     [Arguments(8, KerberosErrorCode.KDC_ERR_SUMTYPE_NOSUPP)]
     [Arguments(-138, KerberosErrorCode.KDC_ERR_SUMTYPE_NOSUPP)]
@@ -579,8 +587,8 @@ public class KdcProcessorTests
         TestRealm realm = new();
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
 
-        // RFC 4120 3.3.2 an unkeyed checksum like CRC32, RSA-MD5 or SHA-1 is inappropriate, other unknown types,
-        // like RSA-MD5-DES and the RC4 HMAC-MD5, are not supported.
+        // The unkeyed checksums other than RSA-MD5, CRC32, RSA-MD4 and SHA-1, are inappropriate, other unknown
+        // types, like RSA-MD5-DES and the RC4 HMAC-MD5, are not supported.
         ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start,
             checksum: _ => new KrbChecksum
             {
@@ -589,6 +597,33 @@ public class KdcProcessorTests
             }));
 
         await AssertError(reply, expected);
+    }
+
+    [Test]
+    [Arguments(EncryptionType.AES128_CTS_HMAC_SHA1_96)]
+    [Arguments(EncryptionType.AES256_CTS_HMAC_SHA1_96)]
+    public async Task AcceptsRsaMd5BodyChecksum(EncryptionType sessionEType)
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt(b => b.EType = [sessionEType]);
+
+        // Windows sends an unkeyed RSA-MD5 checksum of the body whatever the session key type.
+        ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start, checksum: RsaMd5Checksum));
+
+        await Assert.That(reply.Span[0]).IsEqualTo((byte)0x6D);
+    }
+
+    [Test]
+    public async Task RejectsModifiedBodyWithRsaMd5Checksum()
+    {
+        TestRealm realm = new();
+        realm.Store.Create(["HTTP", "other.example.test"], password: null, flags: ObolPrincipalFlag.None);
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        KrbTgsReq request = NewTgsReq(tgt, tgtPart, s_start, checksum: RsaMd5Checksum);
+
+        request.Body.SName = Name("HTTP", "other.example.test");
+
+        await AssertError(realm.Send(request), KerberosErrorCode.KRB_AP_ERR_MODIFIED);
     }
 
     [Test]
@@ -848,6 +883,7 @@ public class KdcProcessorTests
     [Arguments(ObolPrincipalFlag.NotDelegated, 0x4010u)]
     [Arguments(ObolPrincipalFlag.TrustedForDelegation, 0x2010u)]
     [Arguments(ObolPrincipalFlag.NotDelegated | ObolPrincipalFlag.TrustedForDelegation, 0x6010u)]
+    [Arguments(ObolPrincipalFlag.NoAuthDataRequired, 0x80010u)]
     public async Task SetsPacUserAccountControl(ObolPrincipalFlag flags, uint expected)
     {
         TestRealm realm = new();
@@ -1021,6 +1057,39 @@ public class KdcProcessorTests
         KrbTgsReq tgsReq = NewTgsReq(tgt, tgtPart, s_start, paData: tgsRequest is bool t ? [PacRequest(t)] : null);
         KrbTgsRep tgsRep = KrbTgsRep.DecodeApplication(realm.Send(tgsReq));
         await Assert.That(HasPac(TestKdc.DecryptTicket(tgsRep.Ticket, realm.Service))).IsEqualTo(expected);
+    }
+
+    [Test]
+    public async Task OmitsPacForNoAuthDataRequiredService()
+    {
+        TestRealm realm = new();
+        realm.Store.Update(realm.Service, flags: ObolPrincipalFlag.NoAuthDataRequired);
+        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        // MS-KILE 3.3.5.3 the service ticket has no PAC even when the client asks for one, the TGT still has it.
+        KrbTgsRep tgsRep = KrbTgsRep.DecodeApplication(realm.Send(NewTgsReq(tgt, tgtPart, s_start,
+            paData: [PacRequest(true)])));
+        KrbAsRep asRep = KrbAsRep.DecodeApplication(realm.Send(NewAsReq("user", key, s_start,
+            sname: Name(ServiceName.Split('/')), paData: [PacRequest(true)])));
+
+        await Assert.That(HasPac(TestKdc.DecryptTicket(tgt.Ticket, realm.Store.Krbtgt))).IsTrue();
+        await Assert.That(HasPac(TestKdc.DecryptTicket(tgsRep.Ticket, realm.Service))).IsFalse();
+        await Assert.That(HasPac(TestKdc.DecryptTicket(asRep.Ticket, realm.Service))).IsFalse();
+    }
+
+    [Test]
+    public async Task KeepsPacInTgtWhenKrbtgtIsNoAuthDataRequired()
+    {
+        TestRealm realm = new();
+        realm.Store.Update(realm.Store.Krbtgt, flags: ObolPrincipalFlag.NoAuthDataRequired);
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+
+        // MS-KILE 3.3.5.3 a TGT always has a PAC, so do the service tickets issued from it.
+        KrbTgsRep tgsRep = KrbTgsRep.DecodeApplication(realm.Send(NewTgsReq(tgt, tgtPart, s_start)));
+
+        await Assert.That(HasPac(TestKdc.DecryptTicket(tgt.Ticket, realm.Store.Krbtgt))).IsTrue();
+        await Assert.That(HasPac(TestKdc.DecryptTicket(tgsRep.Ticket, realm.Service))).IsTrue();
     }
 
     [Test]

@@ -249,7 +249,7 @@ HelpMessage: ''
 ### -Flag
 
 Options to turn on for the principal, defaults to `None`.
-The values are `None`, `DoesNotRequirePreAuth`, `NotDelegated` and `TrustedForDelegation`, see [PRINCIPAL FLAGS in about_Obol](./about_Obol.md#principal-flags) for what each one does.
+The values are `None`, `DoesNotRequirePreAuth`, `NotDelegated`, `TrustedForDelegation` and `NoAuthDataRequired`, see [PRINCIPAL FLAGS in about_Obol](./about_Obol.md#principal-flags) for what each one does.
 
 ```yaml
 Type: Obol.ObolPrincipalFlag
@@ -281,6 +281,7 @@ AcceptedValues:
 - DoesNotRequirePreAuth
 - NotDelegated
 - TrustedForDelegation
+- NoAuthDataRequired
 HelpMessage: ''
 ```
 

@@ -231,9 +231,51 @@ Describe "MIT krb5" -Skip:(-not $mitKrb5) {
 
             Invoke-KerberosTool { klist } | Should-BeLikeString '*HTTP/web.example.test@EXAMPLE.TEST*'
         }
+
+        It "Mutually authenticates in process with -SetNativeEnvironment" {
+            $params = @{
+                Kdc = $kdc
+                ClientPrincipal = $client
+                ServicePrincipal = $service
+                Provider = 'Mit'
+                SetNativeEnvironment = $true
+            }
+            Enter-ObolKrb5Environment @params
+            $null = Invoke-KerberosTool { kinit -k -i user@EXAMPLE.TEST }
+
+            # .NET uses the system GSSAPI, the initiator reads the ccache and the acceptor the keytab in KRB5_KTNAME.
+            $initiator = [System.Net.Security.NegotiateAuthentication]::new(
+                [System.Net.Security.NegotiateAuthenticationClientOptions]@{
+                    Package = 'Kerberos'
+                    TargetName = 'HTTP/web.example.test'
+                    RequireMutualAuthentication = $true
+                })
+            $acceptor = [System.Net.Security.NegotiateAuthentication]::new(
+                [System.Net.Security.NegotiateAuthenticationServerOptions]@{
+                    Package = 'Kerberos'
+                })
+            try {
+                $initiatorStatus = [System.Net.Security.NegotiateAuthenticationStatusCode]::GenericFailure
+                $acceptorStatus = $initiatorStatus
+                $token = $initiator.GetOutgoingBlob([byte[]]@(), [ref]$initiatorStatus)
+                $initiatorStatus | Should-Be ([System.Net.Security.NegotiateAuthenticationStatusCode]::ContinueNeeded)
+
+                $reply = $acceptor.GetOutgoingBlob([byte[]]$token, [ref]$acceptorStatus)
+                $acceptorStatus | Should-Be ([System.Net.Security.NegotiateAuthenticationStatusCode]::Completed)
+
+                $null = $initiator.GetOutgoingBlob([byte[]]$reply, [ref]$initiatorStatus)
+                $initiatorStatus | Should-Be ([System.Net.Security.NegotiateAuthenticationStatusCode]::Completed)
+                $initiator.IsMutuallyAuthenticated | Should-BeTrue
+                $acceptor.RemoteIdentity.Name | Should-Be 'user@EXAMPLE.TEST'
+            }
+            finally {
+                $initiator.Dispose()
+                $acceptor.Dispose()
+            }
+        }
     }
 
-    Context "Use-ObolKdc" {
+    Context "Use-ObolKrb5Environment" {
         It "Gets tickets in the scriptblock" {
             $params = @{
                 Realm = 'EXAMPLE.TEST'
@@ -242,7 +284,7 @@ Describe "MIT krb5" -Skip:(-not $mitKrb5) {
                 ServicePrincipal = 'HTTP/web.example.test'
                 Provider = 'Mit'
             }
-            $actual = Use-ObolKdc @params {
+            $actual = Use-ObolKrb5Environment @params {
                 $null = Invoke-KerberosTool { kinit -k -i user }
                 Invoke-KerberosTool { kvno -k $env:KRB5_KTNAME HTTP/web.example.test }
             }

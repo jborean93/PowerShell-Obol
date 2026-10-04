@@ -704,6 +704,39 @@ Describe "Start-ObolKdc" {
         (Get-ObolKdc).Count | Should-Be 1
     }
 
+    It "Suggests another loopback address when the port is in use" -Skip:(-not $IsWindows) {
+        $kdc = Start-ObolKdc EXAMPLE.TEST
+
+        $err = { Start-ObolKdc OTHER.TEST -Port $kdc.Port } |
+            Should-Throw -FullyQualifiedErrorId 'KdcBindFailed,Obol.Commands.StartObolKdc'
+        $err.ErrorDetails.Message | Should-BeLikeString '* Use -Address with another 127.0.0.x address *'
+    }
+
+    It "Does not suggest an address when the port is held exclusively on every address" -Skip:(-not $IsWindows) {
+        $tcp = [Socket]::new([AddressFamily]::InterNetwork, [SocketType]::Stream, [ProtocolType]::Tcp)
+        try {
+            $tcp.ExclusiveAddressUse = $true
+            $tcp.Bind([IPEndPoint]::new([IPAddress]::Any, 0))
+            $tcp.Listen()
+            $port = $tcp.LocalEndPoint.Port
+
+            $err = { Start-ObolKdc EXAMPLE.TEST -Port $port } |
+                Should-Throw -FullyQualifiedErrorId 'KdcBindFailed,Obol.Commands.StartObolKdc'
+            $err.ErrorDetails.Message | Should-NotBeLikeString '*-Address*'
+        }
+        finally {
+            $tcp.Dispose()
+        }
+    }
+
+    It "Does not suggest an address for a KDC not on a loopback address" -Skip:(-not $IsWindows) {
+        $kdc = Start-ObolKdc EXAMPLE.TEST -Address 0.0.0.0
+
+        $err = { Start-ObolKdc OTHER.TEST -Address 0.0.0.0 -Port $kdc.Port } |
+            Should-Throw -FullyQualifiedErrorId 'KdcBindFailed,Obol.Commands.StartObolKdc'
+        $err.ErrorDetails.Message | Should-NotBeLikeString '*-Address*'
+    }
+
     It "Fails when the port is in use for UDP" {
         $udp = [UdpClient]::new([IPEndPoint]::new([IPAddress]::Loopback, 0))
         try {

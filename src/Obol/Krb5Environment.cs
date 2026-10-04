@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 
 namespace Obol;
@@ -33,7 +32,7 @@ internal sealed class Krb5Environment
 
     /// <summary>The prompt function of <see cref="Runspace"/> before it was changed and its replacement.</summary>
     /// <remarks>Null if the prompt was not changed. Only used from the pipeline thread of the runspace.</remarks>
-    public (ScriptBlock? Original, ScriptBlock Replacement)? Prompt { get; set; }
+    public Commands.EnvironmentPrompt.Handle? Prompt { get; set; }
 
     /// <summary>The environment entered in the process, or null if none is.</summary>
     public static Krb5Environment? Current

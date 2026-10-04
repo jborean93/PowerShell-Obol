@@ -45,7 +45,7 @@ public sealed class ExitObolKrb5Environment : PSCmdlet
     {
         if (environment.Prompt is { } prompt)
         {
-            Krb5EnvironmentPrompt.Restore(cmdlet, prompt);
+            EnvironmentPrompt.Restore(cmdlet, prompt);
             environment.Prompt = null;
         }
 

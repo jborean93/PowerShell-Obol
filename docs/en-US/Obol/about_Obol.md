@@ -27,6 +27,11 @@ The values are named after the AD `userAccountControl` flags but use Obol's own 
 + `TrustedForDelegation`: Tickets for the principal have the OK-AS-DELEGATE flag, telling clients they can delegate their credentials to it.
   Windows only sends a forwarded TGT to a service with this flag, MIT clients only check it with the `enforce_ok_as_delegate` setting.
   This is the AD flag `TRUSTED_FOR_DELEGATION` (`0x80000`), the MIT `+ok_as_delegate` attribute and the PAC `USER_TRUSTED_FOR_DELEGATION` (`0x2000`).
++ `NoAuthDataRequired`: Tickets for the principal as a service have no PAC, whether issued from an AS-REQ or a TGS-REQ and even when the client asks for one.
+  TGTs always have a PAC, so the flag has no effect on the `krbtgt` principal, and the principal's own TGT still has one when it is the client.
+  Set it on a service when using an SSPI based acceptor on Wnidows from a process without `SeTcbPrivilege`, see [ACCEPTING TICKETS WITH SSPI in about_ObolSspi](./about_ObolSspi.md#accepting-tickets-with-sspi).
+  Without a PAC the client has no groups or SIDs and Windows names it `REALM\user`.
+  This is the AD flag `NO_AUTH_DATA_REQUIRED` (`0x2000000`), the MIT `+no_auth_data_required` attribute and the PAC `USER_NO_AUTH_DATA_REQUIRED` (`0x80000`), see [MS-KILE 3.3.5.3 PAC Generation](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-kile/c25d48df-67f0-4c5f-9e46-27a7d5710909).
 
 # ENCRYPTION TYPES
 The keys of a principal are set with the `-EncryptionType` parameter of `New-ObolPrincipal`, `New-ObolPrincipalSetting` and `Set-ObolPrincipal`, and the `EncryptionType` property of a principal shows the types it has keys for in order of preference.

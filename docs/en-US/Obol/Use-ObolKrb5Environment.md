@@ -1,15 +1,15 @@
 ---
 document type: cmdlet
 external help file: Obol.dll-Help.xml
-HelpUri: https://www.github.com/jborean93/Obol/blob/main/docs/en-US/Obol/Use-ObolKdc.md
+HelpUri: https://www.github.com/jborean93/Obol/blob/main/docs/en-US/Obol/Use-ObolKrb5Environment.md
 Locale: en-US
 Module Name: Obol
 ms.date: ''
 PlatyPS schema version: 2024-05-01
-title: Use-ObolKdc
+title: Use-ObolKrb5Environment
 ---
 
-# Use-ObolKdc
+# Use-ObolKrb5Environment
 
 ## SYNOPSIS
 
@@ -20,17 +20,17 @@ Runs a scriptblock with an Obol KDC and the krb5 environment variables pointing 
 ### Start (Default)
 
 ```
-Use-ObolKdc [-Realm] <string> [-ScriptBlock] <scriptblock> [-Address <ipaddress>] [-Port <int>]
- [-Transport <ObolKdcTransport>] [-MaxUdpReplySize <int>] [-CaseInsensitivePrincipal]
- [-DomainSid <string>] [-Principal <IDictionary>] [-Provider <ObolKrb5Provider>]
- [-ServicePrincipal <string[]>] [-ClientPrincipal <string[]>] [-SetNativeEnvironment] [-NoNewScope]
- [<CommonParameters>]
+Use-ObolKrb5Environment [-Realm] <string> [-ScriptBlock] <scriptblock>
+ [-Provider <ObolKrb5Provider>] [-ServicePrincipal <string[]>] [-ClientPrincipal <string[]>]
+ [-SetNativeEnvironment] [-Port <int>] [-Address <ipaddress>] [-Transport <ObolKdcTransport>]
+ [-MaxUdpReplySize <int>] [-CaseInsensitivePrincipal] [-DomainSid <string>]
+ [-Principal <IDictionary>] [-NoNewScope] [<CommonParameters>]
 ```
 
 ### Kdc
 
 ```
-Use-ObolKdc [-ScriptBlock] <scriptblock> -Kdc <ObolKdc[]> [-Provider <ObolKrb5Provider>]
+Use-ObolKrb5Environment [-ScriptBlock] <scriptblock> -Kdc <ObolKdc[]> [-Provider <ObolKrb5Provider>]
  [-ServicePrincipal <string[]>] [-ClientPrincipal <string[]>] [-SetNativeEnvironment] [-NoNewScope]
  [<CommonParameters>]
 ```
@@ -39,28 +39,30 @@ Use-ObolKdc [-ScriptBlock] <scriptblock> -Kdc <ObolKdc[]> [-Provider <ObolKrb5Pr
 
 ## DESCRIPTION
 
-Starts a KDC, or uses existing ones, enters the krb5 environment for them, runs the scriptblock and then always exits the environment and stops the KDC it started, even when the scriptblock fails.
+Starts a KDC, or uses existing ones, sets up the krb5 environment for them, runs the scriptblock and then always removes the krb5 environment and stops the KDC it started, even when the scriptblock fails.
 It combines `Start-ObolKdc`, `Enter-ObolKrb5Environment`, `Exit-ObolKrb5Environment` and `Stop-ObolKdc` for a script that only needs the KDC while one block of code runs.
-Pester tests that set up a KDC in `BeforeAll` and remove it in `AfterAll` use those cmdlets instead, as a scriptblock cannot span both blocks.
+Pester tests that set up a KDC in `BeforeAll` and remove it in `AfterAll` cannot use a scriptblock that spans both blocks, they use those cmdlets directly.
 
 With `-Realm` a new KDC is started with the KDC parameters of `Start-ObolKdc` and stopped once the scriptblock finishes.
 With `-Kdc` the given KDCs are used and left running.
 Each KDC is passed to the scriptblock as a separate argument, such as `param ($kdc)` or `$args[0]`.
 
-The environment variables are set like `Enter-ObolKrb5Environment` sets them, see that cmdlet for what they are and how they reach child processes and native libraries.
-The keytab environment variables are set from principal names, as a new KDC has no principal objects before it starts.
-It fails if a krb5 environment is already entered in the process, the scriptblock is not run and no KDC is started.
+The krb5 environment is the configuration `Enter-ObolKrb5Environment` sets up: a `krb5.conf` and credential cache in a temporary folder, optional keytabs for `-ServicePrincipal` and `-ClientPrincipal`, and the `KRB5_CONFIG`, `KRB5CCNAME`, `KRB5_KTNAME` and `KRB5_CLIENT_KTNAME` environment variables pointing at them.
+See `Enter-ObolKrb5Environment` for what each one is and how they reach child processes and native libraries.
+The keytabs are written from principal names, as a new KDC has no principal objects before it starts.
+Programs that use MIT krb5 or Heimdal read it, such as `kinit`, `kvno`, `curl` and Python or Java clients, on every platform including Windows.
+The environment variables are set for the whole process, so this fails, without running the scriptblock or starting a KDC, if a krb5 environment is already entered.
+
+Windows' own Kerberos, used by SSPI and anything built on it such as `HttpClient` with default credentials, ignores the krb5 environment, use `Use-ObolSspiEnvironment` for it.
 
 The scriptblock is run like the call operator `& { ... }` runs it, or like the dot-source operator `. { ... }` with `-NoNewScope`:
 
 + Output is written to the pipeline as it is received.
-+ A terminating error in the scriptblock, such as `throw`, is thrown by this cmdlet once the environment is exited and the KDC stopped.
++ A terminating error in the scriptblock, such as `throw`, is thrown by this cmdlet once the krb5 environment is removed and the KDC stopped.
 + Errors, warnings and the other streams are written through this cmdlet, so `-ErrorVariable`, `-WarningVariable`, `-InformationVariable` and redirection such as `3>&1` or `2>$null` apply to them.
 + Commands in the scriptblock follow the preference variables of the caller, such as `$ErrorActionPreference`, like they would in `& { ... }`.
   The `-ErrorAction`, `-WarningAction`, `-InformationAction`, `-Verbose` and `-Debug` common parameters of this cmdlet only apply to its own errors and messages, such as a KDC that fails to start, not to the commands in the scriptblock.
   Set the preference variable inside the scriptblock to change how its commands handle errors, or before calling this cmdlet to change it for the caller too.
-
-On Windows only the krb5 environment variables are set, which affect programs using MIT krb5 or Heimdal and not Windows SSPI authentication.
 
 ## EXAMPLES
 
@@ -68,13 +70,13 @@ On Windows only the krb5 environment variables are set, which affect programs us
 
 ```powershell
 $password = ConvertTo-SecureString -AsPlainText -Force 'Password123!'
-Use-ObolKdc -Realm EXAMPLE.TEST -Principal @{ user = $password; 'HTTP/web.example.test' = $null } {
+Use-ObolKrb5Environment -Realm EXAMPLE.TEST -Principal @{ user = $password; 'HTTP/web.example.test' = $null } {
     'Password123!' | kinit user
     kvno HTTP/web.example.test
 }
 ```
 
-Starts a KDC for `EXAMPLE.TEST` with two principals, gets a ticket for `user` and a service ticket with the MIT krb5 tools, then stops the KDC and restores the environment variables.
+Starts a KDC for `EXAMPLE.TEST` with two principals, gets a ticket for `user` and a service ticket with the MIT krb5 tools, then stops the KDC and removes the krb5 environment.
 
 ### Example 2: Test a client and service with keytabs
 
@@ -85,7 +87,7 @@ $params = @{
     ClientPrincipal = 'user'
     ServicePrincipal = 'HTTP/web.example.test'
 }
-Use-ObolKdc @params {
+Use-ObolKrb5Environment @params {
     param ($kdc)
 
     kinit -k -i user
@@ -101,7 +103,7 @@ Writes a client keytab for `user` and a service keytab for `HTTP/web.example.tes
 $kdc = Start-ObolKdc -Realm EXAMPLE.TEST -Principal @{ user = $null }
 $other = Start-ObolKdc -Realm OTHER.TEST -Principal @{ user = $null }
 
-$kdc, $other | Use-ObolKdc -ClientPrincipal user, user@OTHER.TEST {
+$kdc, $other | Use-ObolKrb5Environment -ClientPrincipal user, user@OTHER.TEST {
     param ($first, $second)
 
     kinit -k -i user@OTHER.TEST
@@ -114,19 +116,19 @@ The KDCs keep running after the scriptblock finishes.
 ### Example 4: Set variables in the current scope
 
 ```powershell
-Use-ObolKdc -Realm EXAMPLE.TEST -NoNewScope {
+Use-ObolKrb5Environment -Realm EXAMPLE.TEST -NoNewScope {
     $ccache = $env:KRB5CCNAME
 }
 $ccache
 ```
 
 Runs the scriptblock in the current scope, so variables it sets are kept after it finishes.
-The credential cache file itself is removed with the environment.
+The credential cache file itself is removed with the krb5 environment.
 
 ### Example 5: Stop on errors in the scriptblock
 
 ```powershell
-Use-ObolKdc -Realm EXAMPLE.TEST {
+Use-ObolKrb5Environment -Realm EXAMPLE.TEST {
     $ErrorActionPreference = 'Stop'
 
     Get-Item ./missing.txt
@@ -136,7 +138,7 @@ Use-ObolKdc -Realm EXAMPLE.TEST {
 
 The commands in the scriptblock follow `$ErrorActionPreference`, so the error from `Get-Item` stops the scriptblock.
 Setting it in the scriptblock only changes it for the scriptblock, which runs in its own scope, with `-NoNewScope` it stays set after the scriptblock finishes.
-`Use-ObolKdc -ErrorAction Stop` would not stop it, as the common parameter only applies to the errors of `Use-ObolKdc` itself and not the scriptblock it runs.
+`Use-ObolKrb5Environment -ErrorAction Stop` would not stop it, as the common parameter only applies to the errors of `Use-ObolKrb5Environment` itself and not the scriptblock it runs.
 
 ## PARAMETERS
 
@@ -331,12 +333,11 @@ HelpMessage: ''
 
 The port to listen on, the same port number is used for TCP and UDP.
 The default of `0` uses a random port that is free for every transport in `-Transport`.
-The port chosen is available from the `Port` property of the output object, or the `Endpoint` property for the address and port together.
+The port chosen is available from the `Port` property of the KDC passed to the scriptblock, or the `Endpoint` property for the address and port together.
 The command fails if the port is already in use for any of those transports.
+On Windows, when the port is in use on an IPv4 loopback address, the error suggests using `-Address` with another `127.0.0.x` address, as Windows allows the same port on different loopback addresses.
 
 The standard Kerberos KDC port is `88`.
-Windows always contacts to a KDC on port `88`, it ignores the port in a `_kerberos` `SRV` record and in a realm mapping like `ksetup /addkdc`, so use `-Port 88` for a KDC that Windows hosts connect to directly.
-Only a KDC proxy (MS-KKDCP) lets Windows reach a KDC through another port by having the proxy forward the traffic to an alternative port.
 MIT and Heimdal clients can use any port set in `krb5.conf` or an `SRV` record.
 On Linux and macOS binding a port below 1024 may need root or a capability like `CAP_NET_BIND_SERVICE`, Windows does not need administrator rights for it.
 Used with `-Realm` only.
@@ -554,13 +555,9 @@ Existing KDCs to use with `-Kdc`.
 
 ## OUTPUTS
 
-### System.Object
-
-The output of the scriptblock.
-
 ## NOTES
 
-`$MyInvocation` in the scriptblock has the script and line that called `Use-ObolKdc`, like `& { ... }` on that line would. Its `InvocationName` is the path of the calling script rather than `&` or `.`, and only the first line of a call that spans several lines is known.
+`$MyInvocation` in the scriptblock has the script and line that called `Use-ObolKrb5Environment`, like `& { ... }` on that line would. Its `InvocationName` is the path of the calling script rather than `&` or `.`, and only the first line of a call that spans several lines is known.
 
 The KDC started with `-Realm` is listed by `Get-ObolKdc` while the scriptblock runs.
 
@@ -570,4 +567,3 @@ The KDC started with `-Realm` is listed by `Get-ObolKdc` while the scriptblock r
 - [Enter-ObolKrb5Environment](./Enter-ObolKrb5Environment.md)
 - [Exit-ObolKrb5Environment](./Exit-ObolKrb5Environment.md)
 - [about_Operators](https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_operators)
-
