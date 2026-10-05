@@ -11,14 +11,14 @@ namespace Obol.Commands;
     VerbsDiagnostic.Trace, "ObolKdc",
     DefaultParameterSetName = StreamParameterSet
 )]
-[OutputType(typeof(ObolKdcEvent))]
+[OutputType(typeof(ObolKdcEvent), typeof(ObolDnsEvent), typeof(ObolLdapEvent))]
 public sealed class TraceObolKdc : PSCmdlet, IDisposable
 {
     private const string StreamParameterSet = "Stream";
     private const string ScriptBlockParameterSet = "ScriptBlock";
 
     private readonly List<ObolKdc> _kdcs = [];
-    private readonly BlockingCollection<ObolKdcEvent> _events = [];
+    private readonly BlockingCollection<ObolTraceEvent> _events = [];
     private readonly CancellationTokenSource _cts = new();
 
     [Parameter(
@@ -34,6 +34,10 @@ public sealed class TraceObolKdc : PSCmdlet, IDisposable
         ParameterSetName = ScriptBlockParameterSet
     )]
     public ScriptBlock? ScriptBlock { get; set; }
+
+    [Parameter]
+    [ValidateRange(ObolTraceType.Kdc, ObolTraceType.All)]
+    public ObolTraceType Include { get; set; } = ObolTraceType.All;
 
     protected override void ProcessRecord()
     {
@@ -64,7 +68,18 @@ public sealed class TraceObolKdc : PSCmdlet, IDisposable
 
         foreach (ObolKdc kdc in _kdcs)
         {
-            kdc.RequestProcessed += OnRequestProcessed;
+            if (Include.HasFlag(ObolTraceType.Kdc))
+            {
+                kdc.RequestProcessed += OnEvent;
+            }
+            if (Include.HasFlag(ObolTraceType.Dns))
+            {
+                kdc.DnsRequestProcessed += OnEvent;
+            }
+            if (Include.HasFlag(ObolTraceType.Ldap))
+            {
+                kdc.LdapRequestProcessed += OnEvent;
+            }
             kdc.Stopped += OnStopped;
         }
         try
@@ -82,7 +97,9 @@ public sealed class TraceObolKdc : PSCmdlet, IDisposable
         {
             foreach (ObolKdc kdc in _kdcs)
             {
-                kdc.RequestProcessed -= OnRequestProcessed;
+                kdc.RequestProcessed -= OnEvent;
+                kdc.DnsRequestProcessed -= OnEvent;
+                kdc.LdapRequestProcessed -= OnEvent;
                 kdc.Stopped -= OnStopped;
             }
         }
@@ -102,9 +119,9 @@ public sealed class TraceObolKdc : PSCmdlet, IDisposable
         CancellationToken cancelToken = _cts.Token;
         try
         {
-            foreach (ObolKdcEvent kdcEvent in _events.GetConsumingEnumerable(cancelToken))
+            foreach (ObolTraceEvent traceEvent in _events.GetConsumingEnumerable(cancelToken))
             {
-                WriteObject(kdcEvent);
+                WriteObject(traceEvent);
             }
         }
         catch (OperationCanceledException) when (cancelToken.IsCancellationRequested)
@@ -137,17 +154,17 @@ public sealed class TraceObolKdc : PSCmdlet, IDisposable
         // The events were raised before each reply was sent, so a request a client in the scriptblock waited for
         // is already queued when the scriptblock returns.
         _events.CompleteAdding();
-        foreach (ObolKdcEvent kdcEvent in _events.GetConsumingEnumerable())
+        foreach (ObolTraceEvent traceEvent in _events.GetConsumingEnumerable())
         {
-            WriteObject(kdcEvent);
+            WriteObject(traceEvent);
         }
     }
 
-    private void OnRequestProcessed(object? sender, ObolKdcEvent kdcEvent)
+    private void OnEvent(object? sender, ObolTraceEvent traceEvent)
     {
         try
         {
-            _events.Add(kdcEvent);
+            _events.Add(traceEvent);
         }
         catch (InvalidOperationException)
         {

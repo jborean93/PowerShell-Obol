@@ -1049,10 +1049,30 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
 
             $actual.Result.ClientName | Should-Be "$($realm.Split('.')[0])\user"
             $actual.Result.MutualAuth | Should-BeTrue
-            [string[]]$actual.Events.Request.MessageType | Should-BeCollection AsReq, AsReq, TgsReq
+            $kdcEvents = @($actual.Events | Where-Object { $_ -is [Obol.ObolKdcEvent] })
+            [string[]]$kdcEvents.Request.MessageType | Should-BeCollection AsReq, AsReq, TgsReq
             # RealmFlags TcpSupported for MitRealm, the DC locator always uses TCP.
-            [string[]]$actual.Events.Transport | Should-BeCollection Tcp, Tcp, Tcp
-            @($actual.Events[0].Request.PreAuthData.Type) -join ',' | Should-Be $PreAuthData
+            [string[]]$kdcEvents.Transport | Should-BeCollection Tcp, Tcp, Tcp
+            @($kdcEvents[0].Request.PreAuthData.Type) -join ',' | Should-Be $PreAuthData
+
+            # The DC locator finds the KDC through a DNS SRV query and checks it with an LDAP ping.
+            $dnsEvents = @($actual.Events | Where-Object { $_ -is [Obol.ObolDnsEvent] })
+            $ldapEvents = @($actual.Events | Where-Object { $_ -is [Obol.ObolLdapEvent] })
+            $kdcHost = "kdc1.$($realm.ToLowerInvariant())"
+            if ($Scope -eq 'DcLocator') {
+                $srv = @($dnsEvents | Where-Object { $_.Type -eq 'Srv' -and $_.ResponseCode -eq 'NoError' })
+                $srv.Count | Should-BeGreaterThan 0
+                $srv[0].Answer[0].Target | Should-Be $kdcHost
+                $srv[0].Message | Should-BeLikeString "SRV _*.$($realm.ToLowerInvariant()): NoError, ${kdcHost}:*"
+
+                $ldapEvents.Count | Should-BeGreaterThan 0
+                $ldapEvents[0].DnsDomain.TrimEnd('.').ToUpperInvariant() | Should-Be $realm
+                $ldapEvents[0].DcHostName | Should-Be $kdcHost
+                $ldapEvents[0].Kdc | Should-Be $kdcEvents[0].Kdc
+            }
+            else {
+                $dnsEvents.Count + $ldapEvents.Count | Should-Be 0
+            }
             $actual.Binding.KdcAddress | Should-Be $Binding
             Get-ObolSspiKdc -Scope Machine | Where-Object Realm -EQ $realm | Should-BeNull
         }

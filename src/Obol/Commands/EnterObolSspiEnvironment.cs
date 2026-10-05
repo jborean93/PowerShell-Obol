@@ -135,9 +135,24 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
         bool setPrompt)
     {
         // A KDC listening on all addresses is reached through loopback.
-        (string, IPAddress, ObolKdcTransport)[] entries = kdcs
-            .Select(k => (k.Realm, Krb5Config.GetClientAddress(k.Endpoint.Address), k.Transport))
+        (ObolKdc, string, IPAddress, ObolKdcTransport)[] entries = kdcs
+            .Select(k => (k, k.Realm, Krb5Config.GetClientAddress(k.Endpoint.Address), k.Transport))
             .ToArray();
+
+        // The DNS server and LDAP ping responder of a KDC listen on its address, they must not answer for another.
+        if (scope == ObolSspiKdcScope.DcLocator && entries
+            .DistinctBy(e => e.Item1)
+            .GroupBy(e => e.Item3)
+            .FirstOrDefault(g => g.Count() > 1) is { } shared)
+        {
+            cmdlet.ThrowTerminatingError(new ErrorRecord(
+                new ArgumentException($"The KDCs {string.Join(", ", shared.Select(e => e.Item1))} use the same " +
+                    $"address {shared.Key}, scope DcLocator needs each KDC on its own address. Start the KDCs on " +
+                    "different addresses such as 127.0.0.1 and 127.0.0.2 with -Address."),
+                "SspiKdcAddressShared",
+                ErrorCategory.InvalidArgument,
+                null));
+        }
 
         SspiEnvironment? environment = null;
         try

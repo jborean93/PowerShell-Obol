@@ -81,14 +81,17 @@ internal sealed partial class SspiMachineSetup
 
     /// <summary>Creates the configuration of a scope for the KDCs.</summary>
     /// <param name="scope">MitRealm or DcLocator.</param>
-    /// <param name="kdcs">The realm, the address clients use and the transports of each KDC.</param>
+    /// <param name="kdcs">
+    /// Each KDC with its realm, the address clients use and its transports. For DcLocator each KDC must have its own
+    /// address.
+    /// </param>
     /// <exception cref="SspiConflictException">Some of the configuration exists, nothing was changed.</exception>
     /// <exception cref="SspiKdcException">
     /// The configuration could not be created, what was created is removed.
     /// </exception>
     public static SspiMachineSetup Apply(
         ObolSspiKdcScope scope,
-        IReadOnlyList<(string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs)
+        IReadOnlyList<(ObolKdc Kdc, string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs)
     {
         Debug.Assert(scope is ObolSspiKdcScope.MitRealm or ObolSspiKdcScope.DcLocator);
 
@@ -110,7 +113,13 @@ internal sealed partial class SspiMachineSetup
             {
                 DcLocatorDomain[] domains = [.. realms.Select(
                     r => DcLocatorDomain.Create(r.Key, [.. r.Select(k => k.Address).Distinct()]))];
-                setup._server = DcLocatorServer.Start(domains);
+                // Each KDC has its own address, a request is for the KDC on the address it was received on.
+                Dictionary<IPAddress, ObolKdc> kdcByAddress = kdcs
+                    .DistinctBy(k => k.Kdc)
+                    .ToDictionary(k => k.Address, k => k.Kdc);
+                setup._server = DcLocatorServer.Start(
+                    domains,
+                    e => kdcByAddress.GetValueOrDefault(e.LocalAddress)?.OnLocatorExchange(e));
                 foreach (DcLocatorDomain domain in domains)
                 {
                     setup.AddNrptRule(domain);

@@ -20,13 +20,14 @@ Outputs the requests Obol KDCs answer, as they happen or the ones made while a s
 ### Stream (Default)
 
 ```
-Trace-ObolKdc -Kdc <ObolKdc[]> [<CommonParameters>]
+Trace-ObolKdc -Kdc <ObolKdc[]> [-Include <ObolTraceType>] [<CommonParameters>]
 ```
 
 ### ScriptBlock
 
 ```
-Trace-ObolKdc [-ScriptBlock] <scriptblock> -Kdc <ObolKdc[]> [<CommonParameters>]
+Trace-ObolKdc [-ScriptBlock] <scriptblock> -Kdc <ObolKdc[]> [-Include <ObolTraceType>]
+ [<CommonParameters>]
 ```
 
 ## ALIASES
@@ -35,6 +36,9 @@ Trace-ObolKdc [-ScriptBlock] <scriptblock> -Kdc <ObolKdc[]> [<CommonParameters>]
 
 Outputs an `ObolKdcEvent` for each request a KDC answers, with the facts of the exchange, the client and service names and the error code, and the request and reply decoded into objects with the parts the KDC decrypted, such as the ticket issued and its PAC.
 See [OUTPUTS](#outputs) and [about_ObolKdcEvent](./about_ObolKdcEvent.md) for the properties.
+
+In an SSPI environment entered with `-Scope DcLocator` it also outputs an `ObolDnsEvent` for each DNS query and an `ObolLdapEvent` for each LDAP ping the Windows DC locator sent to find the KDC, so a trace shows how Windows found the KDC as well as what it asked it.
+Use `-Include` to choose the kinds of requests to output.
 
 Without `-ScriptBlock` the events are written as they happen until the pipeline is stopped with Ctrl+C or a downstream command such as `Select-Object -First`, or until every traced KDC has been stopped.
 Use this to watch a KDC while testing from another process or terminal.
@@ -46,7 +50,7 @@ If the scriptblock fails the events are still written before its error so a fail
 
 Use `Get-ObolKdc | Trace-ObolKdc` to trace every KDC running in the current runspace.
 
-The events come from the `RequestProcessed` .NET event of the `ObolKdc` object, which can also be used directly with `Register-ObjectEvent` to handle requests in the background, see [TRACING REQUESTS in about_Obol](./about_Obol.md#tracing-requests).
+The events come from the `RequestProcessed`, `DnsRequestProcessed` and `LdapRequestProcessed` .NET events of the `ObolKdc` object, which can also be used directly with `Register-ObjectEvent` to handle requests in the background, see [TRACING REQUESTS in about_Obol](./about_Obol.md#tracing-requests).
 
 ## EXAMPLES
 
@@ -228,7 +232,75 @@ OTHER.TEST
 Traces the two KDCs piped to `Trace-ObolKdc` and not the third one running in the runspace, each `kinit` is two requests as the first is answered with `PreAuthRequired`.
 The `Realm` and `Kdc` properties say which KDC answered each request.
 
+### Example 9: Trace how Windows finds the KDC through the DC locator
+
+```powershell
+$password = ConvertTo-SecureString -AsPlainText -Force 'Password123!'
+$principals = @{ user = $password; 'HTTP/web.example.test' = $null }
+Use-ObolSspiEnvironment EXAMPLE.TEST -Scope DcLocator -Principal $principals {
+    param ($kdc)
+
+    Trace-ObolKdc -Kdc $kdc {
+        $credential = [System.Net.NetworkCredential]::new('user', $password, 'EXAMPLE.TEST')
+        $client = [System.Net.Security.NegotiateAuthentication]::new(
+            [System.Net.Security.NegotiateAuthenticationClientOptions]@{
+                Package = 'Kerberos'
+                Credential = $credential
+                TargetName = 'HTTP/web.example.test'
+            })
+        $status = 0
+        $null = $client.GetOutgoingBlob([byte[]]@(), [ref]$status)
+    }
+}
+```
+
+```Output
+Time                 Client              Message
+----                 ------              -------
+6/10/2026 4:38:02 am Udp 127.0.0.1:52846 SRV _kerberos._tcp.dc._msdcs.EXAMPLE.TEST: NoError, kdc1.example.test:88
+6/10/2026 4:38:02 am Udp 127.0.0.1:52846 A kdc1.example.test: NoError, 127.0.0.1
+6/10/2026 4:38:02 am Udp 127.0.0.1:52847 LDAP ping EXAMPLE.TEST (V5, V5Ex, WithClosestSite, Ip): kdc1.example.test 127.0.0.1
+6/10/2026 4:38:02 am Tcp 127.0.0.1:62331 AS-REQ user@EXAMPLE.TEST -> krbtgt/EXAMPLE.TEST@EXAMPLE.TEST: PreAuthRequired
+6/10/2026 4:38:02 am Tcp 127.0.0.1:62332 AS-REQ user@EXAMPLE.TEST -> krbtgt/EXAMPLE.TEST@EXAMPLE.TEST: AS-REP, Aes256Sha1 ticket and session key, PreAuthenticated, Initial, Renewable, Forwardable
+6/10/2026 4:38:02 am Tcp 127.0.0.1:62333 TGS-REQ user@EXAMPLE.TEST -> HTTP/web.example.test@EXAMPLE.TEST: TGS-REP, Aes256Sha1 ticket and session key, PreAuthenticated, Renewable, Forwardable
+```
+
+Gets a service ticket through the Windows Kerberos SSP with the KDC found by the DC locator, which needs administrator rights.
+The locator looks up the KDC with a DNS SRV query, gets the address of the host and checks it is a DC of the domain with an LDAP ping before the SSP sends the Kerberos requests.
+Use `-Include Dns, Ldap` to see only how the KDC was found.
+
+Windows caches what the locator finds, both in the DNS client cache and the locator's own cache, so a lookup repeated for the same realm in the same environment may not send any DNS query or LDAP ping.
+
 ## PARAMETERS
+
+### -Include
+
+The kinds of requests to output, one or more of:
+
++ `Kdc`: The Kerberos requests the KDC answers, as `ObolKdcEvent`
++ `Dns`: The DNS queries the DC locator DNS server answers for the KDC, as `ObolDnsEvent`
++ `Ldap`: The LDAP pings the DC locator CLDAP responder answers for the KDC, as `ObolLdapEvent`
++ `All`: Every kind, the default
+
+`Dns` and `Ldap` only have requests while the KDC is in an SSPI environment entered with `-Scope DcLocator`, see [Enter-ObolSspiEnvironment](./Enter-ObolSspiEnvironment.md).
+Combine values with a comma, such as `-Include Dns, Ldap` for only the DC locator requests, at least one is required.
+
+```yaml
+Type: Obol.ObolTraceType
+DefaultValue: All
+SupportsWildcards: false
+Aliases: []
+ParameterSets:
+- Name: (All)
+  Position: Named
+  IsRequired: false
+  ValueFromPipeline: false
+  ValueFromPipelineByPropertyName: false
+  ValueFromRemainingArguments: false
+DontShow: false
+AcceptedValues: []
+HelpMessage: ''
+```
 
 ### -Kdc
 
@@ -323,6 +395,37 @@ The other keys of an exchange, the TGT session key and the authenticator subkey,
 The keys are kept with the event so the messages can be decrypted even after the principal's keys were changed with `Set-ObolPrincipal`, and can be written to a keytab with `Export-ObolKeytab -Entry` or `ConvertTo-ObolKeytab -Entry`.
 They are the secrets of the test realm, treat the events as such.
 
+### Obol.ObolDnsEvent
+
+One event for each DNS query the DC locator DNS server of a `DcLocator` SSPI environment received for a traced KDC.
+The DNS server listens on UDP port 53 of the address of each KDC, a query is output for the KDC on the address it was sent to.
+
+- `Message`: A one line summary, the record type and name asked for and the response code with the answers, such as `SRV _kerberos._tcp.dc._msdcs.EXAMPLE.TEST: NoError, kdc1.example.test:88` or `A web.other.test: Refused`
+- `Kdc`, `Realm`, `Time`, `Duration`, `Transport`, `ClientAddress`: As for `ObolKdcEvent`, `Transport` is always `Udp`
+- `Id`: The ID of the query
+- `Name`, `Type`: The name and record type asked for, such as `Srv`, `A` or `Aaaa`, `$null` if the question could not be read
+- `ResponseCode`: The response code of the reply, such as `NoError`, `NameError` for a name in the realm that does not exist or `Refused` for a name outside of the realms, `$null` if the query was not answered
+- `Answer`, `Additional`: The records of the answer and additional sections of the reply, each with the `Name`, `Type` and `Ttl`, and the `Address` of an `A` or `Aaaa` record or the `Target` and `Port` of an `Srv` record
+- `Exception`: The unexpected exception that stopped the query from being answered, otherwise `$null`
+- `RequestBytes`, `ReplyBytes`: The query as received and the reply as sent, `ReplyBytes` is `$null` if the query was not answered
+
+### Obol.ObolLdapEvent
+
+One event for each LDAP ping the DC locator CLDAP responder of a `DcLocator` SSPI environment received for a traced KDC.
+The Windows DC locator sends the ping, an LDAP search over UDP port 389, to the KDC it found through DNS to check it is a domain controller of the domain.
+The responder listens on UDP port 389 of the address of each KDC, a ping is output for the KDC on the address it was sent to.
+
+- `Message`: A one line summary, the `DnsDomain` and `NtVer` of the ping and the KDC in the reply, such as `LDAP ping EXAMPLE.TEST (V5, V5Ex, WithClosestSite, Ip): kdc1.example.test 127.0.0.1` or `LDAP ping other.test (V5Ex): no such domain`
+- `Kdc`, `Realm`, `Time`, `Duration`, `Transport`, `ClientAddress`: As for `ObolKdcEvent`, `Transport` is always `Udp`
+- `MessageId`, `IsPing`: The LDAP message ID and whether the request is a search, any other LDAP request is not answered
+- `Filter`: Every equality match of the search filter with its value as sent, the names are case insensitive
+- `DnsDomain`, `Host`, `User`, `DomainGuid`, `NtVersion`, `AccountControl`: The `DnsDomain`, `Host`, `User`, `DomainGuid`, `NtVer` and `AAC` values of the filter decoded, `$null` for one not sent
+- `DcHostName`, `DcAddress`, `DcFlags`: The KDC host name, address and DC flags in the reply, `$null` and `None` if the ping is for another domain, which the locator treats as the host not being a DC of the domain
+- `Exception`: The exception that stopped the request from being answered, such as a request that is not valid BER, otherwise `$null`
+- `RequestBytes`, `ReplyBytes`: The request as received and the reply as sent, `ReplyBytes` is `$null` if the request was not answered
+
+Like `ObolKdcEvent` the structure of these events is for viewing and diagnostics, not a public API, and `Message` is the property to assert on.
+
 ## NOTES
 
 The events are raised by the KDC before each reply is sent, so when a client call in the scriptblock returns the events of its requests have been captured.
@@ -330,6 +433,9 @@ A failed send, such as to a client that gave up waiting, is not recorded.
 
 A reply too big for UDP is recorded with the `ResponseTooBig` error code and a TCP request too long to read with `FieldTooLong` and an empty `Request`.
 A client retrying over TCP shows as a second event.
+
+The DNS queries and LDAP pings of a `DcLocator` SSPI environment are answered by listeners the environment runs, not the KDC itself, and are traced on the KDC they were sent to.
+A query or ping that is not answered, such as a DNS reply sent to the server or a request that cannot be decoded, is still output with a `$null` `ReplyBytes`.
 
 ## RELATED LINKS
 

@@ -1,5 +1,4 @@
 using System;
-using System.Net;
 using System.Text;
 using Obol.Kerberos;
 using Obol.Protocol;
@@ -14,15 +13,11 @@ namespace Obol;
 /// parts the KDC decrypted or built, such as the TGT of a TGS-REQ and the ticket issued, are decrypted in the model.
 /// <see cref="Key"/> holds the long-term keys that decrypt every encrypted part of both messages.
 /// </remarks>
-public sealed class ObolKdcEvent : EventArgs
+public sealed class ObolKdcEvent : ObolTraceEvent
 {
     internal ObolKdcEvent(ObolKdc kdc, KdcExchange exchange)
+        : base(kdc, exchange.Time, exchange.Duration, exchange.Transport, exchange.ClientAddress)
     {
-        Kdc = kdc;
-        Time = exchange.Time;
-        Duration = exchange.Duration;
-        Transport = exchange.Transport;
-        ClientAddress = exchange.ClientAddress;
         ClientName = exchange.ClientName;
         ServiceName = exchange.ServiceName;
         ErrorCode = exchange.ErrorCode;
@@ -40,25 +35,7 @@ public sealed class ObolKdcEvent : EventArgs
     /// key, PreAuthenticated, Initial</c> or <c>AS-REQ user@EXAMPLE.TEST -&gt; krbtgt/EXAMPLE.TEST@EXAMPLE.TEST:
     /// PreAuthRequired</c>.
     /// </summary>
-    public string Message { get; }
-
-    /// <summary>The KDC that answered the request.</summary>
-    public ObolKdc Kdc { get; }
-
-    /// <summary>The realm of the KDC.</summary>
-    public string Realm => Kdc.Realm;
-
-    /// <summary>The local time the request was received.</summary>
-    public DateTime Time { get; }
-
-    /// <summary>How long the KDC took to process the request, not including the network.</summary>
-    public TimeSpan Duration { get; }
-
-    /// <summary>The transport the request arrived on, <c>Tcp</c> or <c>Udp</c>.</summary>
-    public ObolKdcTransport Transport { get; }
-
-    /// <summary>The address and port the client sent the request from, null if it was already gone.</summary>
-    public IPEndPoint? ClientAddress { get; }
+    public override string Message { get; }
 
     /// <summary>
     /// The client principal with its realm, such as <c>user@EXAMPLE.TEST</c>, as the client sent it in an AS-REQ or
@@ -101,8 +78,6 @@ public sealed class ObolKdcEvent : EventArgs
     /// The reply as sent: an <see cref="KdcReply"/> with the ticket, or an <see cref="ErrorReply"/>.
     /// </summary>
     public Message Reply { get; }
-
-    public override string ToString() => Message;
 
     private string BuildMessage()
     {

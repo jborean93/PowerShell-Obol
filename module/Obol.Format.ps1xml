@@ -134,9 +134,9 @@
       </TableControl>
     </View>
     <View>
-      <Name>Obol.ObolKdcEvent</Name>
+      <Name>Obol.ObolTraceEvent</Name>
       <ViewSelectedBy>
-        <TypeName>Obol.ObolKdcEvent</TypeName>
+        <TypeName>Obol.ObolTraceEvent</TypeName>
       </ViewSelectedBy>
       <TableControl>
         <TableHeaders>

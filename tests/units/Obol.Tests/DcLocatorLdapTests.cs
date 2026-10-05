@@ -178,6 +178,77 @@ public class DcLocatorLdapTests
         await Assert.That(s_ldap.Process(new byte[] { 0x30, 0x80 }, IPAddress.Loopback)).IsNull();
     }
 
+    private static DcLocatorLdapExchange ProcessExchange(byte[] request, IPAddress localAddress)
+    {
+        DcLocatorLdapExchange exchange = new() { RequestBytes = request, LocalAddress = localAddress };
+        s_ldap.Process(exchange);
+        return exchange;
+    }
+
+    private static ObolLdapEvent NewEvent(DcLocatorLdapExchange exchange)
+    {
+        using ObolKdc kdc = ObolKdc.Bind("EXAMPLE.TEST", new IPEndPoint(IPAddress.Loopback, 0),
+            ObolKdcTransport.Tcp, KdcListener.DefaultMaxUdpReplySize, false, null);
+        return new ObolLdapEvent(kdc, exchange);
+    }
+
+    [Test]
+    public async Task RecordsPingAndReply()
+    {
+        DcLocatorLdapExchange exchange = ProcessExchange(NewPing("EXAMPLE.TEST", NtVersion5Ex | NtVersion5ExWithIp),
+            IPAddress.Parse("127.0.0.2"));
+
+        await Assert.That(exchange.MessageId).IsEqualTo(7);
+        await Assert.That(exchange.IsSearch).IsTrue();
+        await Assert.That(exchange.DcHostName).IsEqualTo("kdc2.example.test");
+        await Assert.That(exchange.DcAddress).IsEqualTo(IPAddress.Parse("127.0.0.2"));
+
+        ObolLdapEvent ldapEvent = NewEvent(exchange);
+        await Assert.That(ldapEvent.DnsDomain).IsEqualTo("EXAMPLE.TEST");
+        await Assert.That(ldapEvent.Host).IsEqualTo("CLIENT");
+        await Assert.That(ldapEvent.User).IsNull();
+        await Assert.That(ldapEvent.NtVersion).IsEqualTo(ObolNetlogonNtVersion.V5Ex | ObolNetlogonNtVersion.V5ExWithIp);
+        await Assert.That(ldapEvent.Filter.Keys).IsEquivalentTo(new[] { "DnsDomain", "Host", "NtVer" });
+        await Assert.That(ldapEvent.DcFlags.HasFlag(ObolSspiDcFlags.Kdc | ObolSspiDcFlags.Ldap)).IsTrue();
+        await Assert.That(ldapEvent.Transport).IsEqualTo(ObolKdcTransport.Udp);
+        await Assert.That(ldapEvent.Message).IsEqualTo(
+            "LDAP ping EXAMPLE.TEST (V5Ex, V5ExWithIp): kdc2.example.test 127.0.0.2");
+    }
+
+    [Test]
+    public async Task DescribesPingForOtherDomain()
+    {
+        DcLocatorLdapExchange exchange = ProcessExchange(NewPing("other.test", NtVersion5Ex), IPAddress.Loopback);
+        ObolLdapEvent ldapEvent = NewEvent(exchange);
+
+        await Assert.That(ldapEvent.ReplyBytes).IsNotNull();
+        await Assert.That(ldapEvent.DcHostName).IsNull();
+        await Assert.That(ldapEvent.DcFlags).IsEqualTo(ObolSspiDcFlags.None);
+        await Assert.That(ldapEvent.Message).IsEqualTo("LDAP ping other.test (V5Ex): no such domain");
+    }
+
+    [Test]
+    public async Task DescribesOtherRequests()
+    {
+        AsnWriter writer = new(AsnEncodingRules.BER);
+        using (writer.PushSequence())
+        {
+            writer.WriteInteger(1);
+            writer.WriteNull(new Asn1Tag(TagClass.Application, 2));
+        }
+
+        ObolLdapEvent unbind = NewEvent(ProcessExchange(writer.Encode(), IPAddress.Loopback));
+        await Assert.That(unbind.MessageId).IsEqualTo(1);
+        await Assert.That(unbind.IsPing).IsFalse();
+        await Assert.That(unbind.Exception).IsNull();
+        await Assert.That(unbind.Message).IsEqualTo("LDAP request: not an LDAP ping, no reply");
+
+        ObolLdapEvent invalid = NewEvent(ProcessExchange([0x30, 0x80], IPAddress.Loopback));
+        await Assert.That(invalid.MessageId).IsNull();
+        await Assert.That(invalid.Exception).IsTypeOf<AsnContentException>();
+        await Assert.That(invalid.Message).StartsWith("LDAP request: not an LDAP ping, no reply, ");
+    }
+
     private enum SearchScope
     {
         BaseObject = 0,

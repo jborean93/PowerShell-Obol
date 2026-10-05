@@ -170,6 +170,10 @@ Unregister-Event -SourceIdentifier $subscription.Name
 
 Without `-Action` the events queue in the runspace and `Get-Event` or `Wait-Event` return them, the `ObolKdcEvent` is the `SourceEventArgs` property.
 
+In an SSPI environment entered with `-Scope DcLocator` the DNS server and LDAP ping responder Obol runs for the Windows DC locator also raise the `DnsRequestProcessed` event with an `ObolDnsEvent` and the `LdapRequestProcessed` event with an `ObolLdapEvent` on the KDC each request was sent to.
+`Trace-ObolKdc` outputs these too, `-Include` chooses which kinds of requests it outputs.
+All three event types derive from `Obol.ObolTraceEvent`, which has the `Kdc`, `Realm`, `Time`, `Duration`, `Transport`, `ClientAddress` and `Message` properties.
+
 The `Bytes` of `Request` and `Reply` are the messages as sent and `Key` the long-term keys they were encrypted with as keytab entries, so an exchange can be decoded and decrypted with other tools even after the principal's keys were changed.
 These keys are the secrets of the test realm.
 See [about_ObolWireshark](./about_ObolWireshark.md) for decrypting a capture of the traffic.

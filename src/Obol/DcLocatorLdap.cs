@@ -70,20 +70,34 @@ internal sealed class DcLocatorLdap
     /// <returns>The reply, or null if the request is not a search request that can be answered.</returns>
     public byte[]? Process(ReadOnlyMemory<byte> request, IPAddress localAddress)
     {
+        DcLocatorLdapExchange exchange = new() { RequestBytes = request.ToArray(), LocalAddress = localAddress };
+        Process(exchange);
+        return exchange.ReplyBytes;
+    }
+
+    /// <summary>
+    /// Builds the reply to the ping in <see cref="DcLocatorExchange.RequestBytes"/>, received on
+    /// <see cref="DcLocatorExchange.LocalAddress"/>, and records what was asked and answered.
+    /// <see cref="DcLocatorExchange.ReplyBytes"/> is left null if the request is not a search request.
+    /// </summary>
+    public void Process(DcLocatorLdapExchange exchange)
+    {
         int messageId;
-        Dictionary<string, byte[]> filter = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, byte[]> filter = exchange.Filter;
         try
         {
-            AsnReader message = new AsnReader(request, AsnEncodingRules.BER).ReadSequence();
+            AsnReader message = new AsnReader(exchange.RequestBytes, AsnEncodingRules.BER).ReadSequence();
             if (!message.TryReadInt32(out messageId))
             {
-                return null;
+                return;
             }
+            exchange.MessageId = messageId;
             if (message.PeekTag() != s_searchRequestTag)
             {
-                return null;
+                return;
             }
 
+            exchange.IsSearch = true;
             AsnReader search = message.ReadSequence(s_searchRequestTag);
             search.ReadOctetString(); // baseObject
             search.ReadEncodedValue(); // scope
@@ -93,9 +107,10 @@ internal sealed class DcLocatorLdap
             search.ReadEncodedValue(); // typesOnly
             ReadFilter(search, filter);
         }
-        catch (AsnContentException)
+        catch (AsnContentException e)
         {
-            return null;
+            exchange.Exception = e;
+            return;
         }
 
         AsnWriter writer = new(AsnEncodingRules.DER);
@@ -104,7 +119,11 @@ internal sealed class DcLocatorLdap
             uint ntVersion = filter.TryGetValue("NtVer", out byte[]? ntVer) && ntVer.Length >= 4
                 ? BinaryPrimitives.ReadUInt32LittleEndian(ntVer)
                 : 0;
-            byte[] netlogon = BuildNetlogonResponse(domain, localAddress, ntVersion);
+            (string hostName, IPAddress address) = SelectKdc(domain, exchange.LocalAddress);
+            byte[] netlogon = BuildNetlogonResponse(domain, hostName, address, ntVersion);
+            exchange.DcHostName = hostName;
+            exchange.DcAddress = address;
+            exchange.DcFlags = DcFlags;
 
             using (writer.PushSequence())
             {
@@ -138,7 +157,7 @@ internal sealed class DcLocatorLdap
                 writer.WriteOctetString([]);
             }
         }
-        return writer.Encode();
+        exchange.ReplyBytes = writer.Encode();
     }
 
     /// <summary>Collects the equality matches of a filter, including the ones nested in an AND.</summary>
@@ -179,20 +198,23 @@ internal sealed class DcLocatorLdap
         return null;
     }
 
-    /// <summary>Builds the NETLOGON_SAM_LOGON_RESPONSE_EX, MS-ADTS 6.3.1.9.</summary>
-    internal static byte[] BuildNetlogonResponse(DcLocatorDomain domain, IPAddress localAddress, uint ntVersion)
+    /// <summary>The KDC the ping reached, a ping to another address of the host gets the first KDC.</summary>
+    private static (string HostName, IPAddress Address) SelectKdc(DcLocatorDomain domain, IPAddress localAddress)
     {
-        // The KDC the ping reached, a ping to another address of the host gets the first KDC.
-        (string hostName, IPAddress address) = domain.Kdcs[0];
-        foreach ((string host, IPAddress kdcAddress) in domain.Kdcs)
+        foreach ((string host, IPAddress address) in domain.Kdcs)
         {
-            if (kdcAddress.Equals(localAddress))
+            if (address.Equals(localAddress))
             {
-                (hostName, address) = (host, kdcAddress);
-                break;
+                return (host, address);
             }
         }
+        return domain.Kdcs[0];
+    }
 
+    /// <summary>Builds the NETLOGON_SAM_LOGON_RESPONSE_EX for the KDC, MS-ADTS 6.3.1.9.</summary>
+    private static byte[] BuildNetlogonResponse(DcLocatorDomain domain, string hostName, IPAddress address,
+        uint ntVersion)
+    {
         List<byte> buffer = new(256);
         WriteUInt16(buffer, OpcodeSamLogonResponseEx);
         WriteUInt16(buffer, 0); // Sbz

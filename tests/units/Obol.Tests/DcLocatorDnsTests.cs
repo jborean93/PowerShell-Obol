@@ -186,4 +186,81 @@ public class DcLocatorDnsTests
         await Assert.That(s_dns.Process(NewQuery("example.test", TypeA, flags: 0x8000))).IsNull();
         await Assert.That(s_dns.Process(new byte[4])).IsNull();
     }
+
+    private static DcLocatorDnsExchange ProcessExchange(byte[] request)
+    {
+        DcLocatorDnsExchange exchange = new() { RequestBytes = request };
+        s_dns.Process(exchange);
+        return exchange;
+    }
+
+    private static ObolDnsEvent NewEvent(DcLocatorDnsExchange exchange)
+    {
+        using ObolKdc kdc = ObolKdc.Bind("EXAMPLE.TEST", new IPEndPoint(IPAddress.Loopback, 0),
+            ObolKdcTransport.Tcp, KdcListener.DefaultMaxUdpReplySize, false, null);
+        return new ObolDnsEvent(kdc, exchange);
+    }
+
+    [Test]
+    public async Task RecordsSrvQueryAndAnswers()
+    {
+        DcLocatorDnsExchange exchange = ProcessExchange(NewQuery("_kerberos._tcp.dc._msdcs.example.test", TypeSrv));
+
+        await Assert.That(exchange.Id).IsEqualTo((ushort)0x1234);
+        await Assert.That(exchange.Name).IsEqualTo("_kerberos._tcp.dc._msdcs.example.test");
+        await Assert.That(exchange.Type).IsEqualTo(ObolDnsRecordType.Srv);
+        await Assert.That(exchange.ResponseCode).IsEqualTo(ObolDnsResponseCode.NoError);
+        await Assert.That(exchange.Answers.Count).IsEqualTo(2);
+        await Assert.That(exchange.Answers[0].Name).IsEqualTo("_kerberos._tcp.dc._msdcs.example.test");
+        await Assert.That(exchange.Answers[0].Type).IsEqualTo(ObolDnsRecordType.Srv);
+        await Assert.That(exchange.Answers[0].Target).IsEqualTo("kdc1.example.test");
+        await Assert.That(exchange.Answers[0].Port).IsEqualTo(88);
+        await Assert.That(exchange.Answers[0].Address).IsNull();
+        await Assert.That(exchange.Additional.Count).IsEqualTo(2);
+        await Assert.That(exchange.Additional[0].Name).IsEqualTo("kdc1.example.test");
+        await Assert.That(exchange.Additional[0].Type).IsEqualTo(ObolDnsRecordType.A);
+        await Assert.That(exchange.Additional[0].Address).IsEqualTo(IPAddress.Parse("127.0.0.1"));
+        await Assert.That(exchange.Additional[1].Type).IsEqualTo(ObolDnsRecordType.Aaaa);
+
+        ObolDnsEvent dnsEvent = NewEvent(exchange);
+        await Assert.That(dnsEvent.Message).IsEqualTo(
+            "SRV _kerberos._tcp.dc._msdcs.example.test: NoError, kdc1.example.test:88, kdc2.example.test:88");
+        await Assert.That(dnsEvent.Transport).IsEqualTo(ObolKdcTransport.Udp);
+        await Assert.That(dnsEvent.ReplyBytes).IsNotNull();
+    }
+
+    [Test]
+    [Arguments("kdc1.example.test", TypeA, "A kdc1.example.test: NoError, 127.0.0.1")]
+    [Arguments("kdc1.example.test", TypeAaaa, "AAAA kdc1.example.test: NoError, no records")]
+    [Arguments("web.example.test", TypeA, "A web.example.test: NameError")]
+    [Arguments("web.other.test", TypeA, "A web.other.test: Refused")]
+    public async Task DescribesReply(string name, ushort type, string message)
+    {
+        DcLocatorDnsExchange exchange = ProcessExchange(NewQuery(name, type));
+
+        await Assert.That(NewEvent(exchange).Message).IsEqualTo(message);
+    }
+
+    [Test]
+    public async Task DescribesQueryWithoutQuestion()
+    {
+        DcLocatorDnsExchange exchange = ProcessExchange(NewQuery("example.test", TypeA, questions: 2));
+
+        await Assert.That(exchange.Name).IsNull();
+        await Assert.That(exchange.ResponseCode).IsEqualTo(ObolDnsResponseCode.FormatError);
+        await Assert.That(NewEvent(exchange).Message).IsEqualTo("DNS query: FormatError");
+    }
+
+    [Test]
+    public async Task DescribesQueryWithoutReply()
+    {
+        DcLocatorDnsExchange exchange = ProcessExchange(new byte[4]);
+        ObolDnsEvent dnsEvent = NewEvent(exchange);
+
+        await Assert.That(dnsEvent.Id).IsNull();
+        await Assert.That(dnsEvent.ResponseCode).IsNull();
+        await Assert.That(dnsEvent.ReplyBytes).IsNull();
+        await Assert.That(dnsEvent.RequestBytes).IsEquivalentTo(new byte[4]);
+        await Assert.That(dnsEvent.Message).IsEqualTo("DNS query: no reply");
+    }
 }

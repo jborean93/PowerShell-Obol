@@ -31,7 +31,10 @@ internal sealed class KdcListener : IDisposable
     public const int MaxUdpPayloadSize = 65507;
 
     /// <summary>How many random ports are tried to find one free for both TCP and UDP.</summary>
-    private const int RandomPortAttempts = 10;
+    private const int RandomPortAttempts = 32;
+
+    /// <summary>The IANA dynamic port range the retries pick a random port from, RFC 6335 6.</summary>
+    private const int DynamicPortStart = 49152;
 
     /// <summary>How long to wait for the receive loops and requests to finish when stopping.</summary>
     private static readonly TimeSpan s_stopTimeout = TimeSpan.FromSeconds(5);
@@ -120,7 +123,9 @@ internal sealed class KdcListener : IDisposable
     private static (Socket? Tcp, Socket? Udp) BindSockets(IPEndPoint endpoint, bool tcp, bool udp)
     {
         // A random TCP port may already be used for UDP, try a few before giving up. On Windows the port can also be
-        // in a range reserved for UDP only, such as by Hyper-V or WinNAT, which fails with access denied.
+        // in a range reserved for UDP only, such as by Hyper-V or WinNAT, which fails with access denied. Windows
+        // hands out TCP ports in sequence and those reservations are blocks of ports, so the next port the OS picks
+        // is likely in the same block. The retries pick a random port in the dynamic range instead.
         int attempts = endpoint.Port == 0 && tcp && udp ? RandomPortAttempts : 1;
         for (int i = 1; ; i++)
         {
@@ -128,11 +133,13 @@ internal sealed class KdcListener : IDisposable
             Socket? udpSocket = null;
             try
             {
-                IPEndPoint bindEndpoint = endpoint;
+                IPEndPoint bindEndpoint = i == 1
+                    ? endpoint
+                    : new(endpoint.Address, Random.Shared.Next(DynamicPortStart, IPEndPoint.MaxPort + 1));
                 if (tcp)
                 {
                     tcpSocket = CreateSocket(endpoint, SocketType.Stream, ProtocolType.Tcp);
-                    tcpSocket.Bind(endpoint);
+                    tcpSocket.Bind(bindEndpoint);
                     tcpSocket.Listen();
                     bindEndpoint = (IPEndPoint)tcpSocket.LocalEndPoint!;
                 }
@@ -150,11 +157,10 @@ internal sealed class KdcListener : IDisposable
             }
             catch (SocketException e) when (
                 e.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied
-                && udpSocket is not null
                 && i < attempts)
             {
                 tcpSocket?.Dispose();
-                udpSocket.Dispose();
+                udpSocket?.Dispose();
             }
             catch
             {
