@@ -47,14 +47,14 @@ Each KDC is passed to the scriptblock as a separate argument, such as `param ($k
 
 Windows' own Kerberos, used by SSPI and anything built on it such as `HttpClient` with default credentials, `NegotiateStream`, `System.DirectoryServices` and SMB, ignores `krb5.conf` and the krb5 environment variables.
 This registers each KDC's realm with Windows Kerberos instead, so it sends the requests for that realm to the KDC, the same as `Enter-ObolSspiEnvironment`.
-`-Scope` sets which authentication uses the KDCs:
+`-Scope` picks how Windows finds the KDCs, which sets which authentication uses them:
 
-+ `Thread` (the default): only Kerberos authentication done on the thread the scriptblock runs on. No administrator rights are needed.
-+ `Machine`: all Kerberos authentication on the machine, including other processes and SMB, through the KDC binding cache. This needs administrator rights.
-+ `MitRealm`: all Kerberos authentication on the machine, the realm is added like `ksetup.exe /addkdc` so Windows treats it as an MIT realm. This needs administrator rights.
-+ `DcLocator`: all Kerberos authentication on the machine, Windows finds the KDC like a domain controller of an Active Directory domain through a DNS server and LDAP ping responder Obol runs on UDP ports 53 and 389 of the KDC address. This needs administrator rights.
++ `Thread` (the default): only authentication done on the thread the scriptblock runs on, through a per-thread pin. No administrator rights are needed.
++ `Machine`: all authentication on the machine, through the KDC binding cache, for about 10 minutes. This needs administrator rights.
++ `MitRealm`: all authentication on the machine, the realm is added to the registry like `ksetup.exe /addkdc` so Windows treats it as an MIT realm. This needs administrator rights.
++ `DcLocator`: all authentication on the machine, Windows finds the KDC like an Active Directory domain controller through a DNS server and LDAP ping responder Obol runs. This needs administrator rights.
 
-See `Enter-ObolSspiEnvironment` for how the machine wide scopes differ.
+See [SSPI ENVIRONMENT SCOPES in about_ObolSspi](./about_ObolSspi.md#sspi-environment-scopes) for a comparison of the scopes, their requirements and limitations, and what each one leaves behind.
 
 Programs that use MIT krb5 or Heimdal, such as `kinit` or a Python or Java client, use `Use-ObolKrb5Environment` instead.
 This cmdlet is only supported on Windows and errors on other platforms.
@@ -74,10 +74,8 @@ Windows Kerberos has some limitations:
   A KDC started with `-Realm` always listens on port 88, if it is already in use set `-Address` to another `127.0.0.x` address, as Windows allows the same port on different loopback addresses.
   A KDC from `-Kdc` on any other port is an error and the scriptblock is not run.
 + It cannot remove the registration of a single realm, so when the scriptblock finishes every registration in the same scope is removed, see `Exit-ObolSspiEnvironment`.
-  With `Thread` this fails if the thread already has a KDC from `Add-ObolSspiKdc`, as it would be removed.
-+ With `Thread`, authentication that is not done on the scriptblock's thread does not use the KDC, such as in a job, another runspace or an async continuation, or SMB and CredSSP which Windows does on its own threads.
-+ With `Machine`, Windows stops using the KDC about 10 minutes after the scriptblock starts, the `FarKdcTimeout` setting, as it only keeps a KDC added by hand for that long.
-+ With `MitRealm` and `DcLocator`, it fails without starting a KDC if the realm's registry key or an NRPT rule for the realm already exists, existing configuration is never changed.
++ Each scope has its own limitations, such as `Thread` only applying to the scriptblock's thread and `Machine` only lasting about 10 minutes, see [SSPI ENVIRONMENT SCOPES in about_ObolSspi](./about_ObolSspi.md#sspi-environment-scopes).
+  A scope that cannot be used, such as `MitRealm` when the realm's registry key already exists, fails without starting a KDC.
 
 Only one SSPI environment can be entered in the process at a time, so this fails without starting a KDC if `Enter-ObolSspiEnvironment` or another `Use-ObolSspiEnvironment` has one entered.
 It can be used inside `Use-ObolKrb5Environment`, or the other way around, to configure both environment types.
@@ -395,10 +393,14 @@ HelpMessage: ''
 
 Which authentication uses the KDCs while the scriptblock runs.
 
-+ `Thread`: Kerberos authentication done on the thread the scriptblock runs on, like `Add-ObolSspiKdc -Scope Thread`. No administrator rights are needed.
-+ `Machine`: all Kerberos authentication on the machine, like `Add-ObolSspiKdc -Scope Machine`. This needs administrator rights, without them it fails before the KDC is started.
-+ `MitRealm`: all Kerberos authentication on the machine, the realm and its KDCs are added to the registry like `ksetup.exe /addkdc`. This needs administrator rights, without them it fails before the KDC is started.
-+ `DcLocator`: all Kerberos authentication on the machine, an NRPT rule sends the realm's DNS queries to a DNS server and LDAP ping responder Obol runs. The realm must be a DNS name. This needs administrator rights, without them it fails before the KDC is started.
++ `Thread`: authentication done on the thread the scriptblock runs on, like `Add-ObolSspiKdc -Scope Thread`.
++ `Machine`: all authentication on the machine for about 10 minutes, like `Add-ObolSspiKdc -Scope Machine`.
++ `MitRealm`: all authentication on the machine, the realm is added to the registry like `ksetup.exe /addkdc`.
++ `DcLocator`: all authentication on the machine, the KDC is found like an Active Directory domain controller. The realm must be a DNS name.
+
+Every scope but `Thread` needs administrator rights, without them it fails before the KDC is started.
+The default is `Thread`.
+See [SSPI ENVIRONMENT SCOPES in about_ObolSspi](./about_ObolSspi.md#sspi-environment-scopes) for how they differ.
 
 ```yaml
 Type: Obol.ObolSspiKdcScope
@@ -488,6 +490,8 @@ Existing KDCs to use with `-Kdc`.
 `$MyInvocation` in the scriptblock has the script and line that called `Use-ObolSspiEnvironment`, like `& { ... }` on that line would. Its `InvocationName` is the path of the calling script rather than `&` or `.`, and only the first line of a call that spans several lines is known.
 
 The KDC started with `-Realm` is listed by `Get-ObolKdc` while the scriptblock runs.
+
+The tickets Windows got from the KDC stay cached after the scriptblock finishes, see [CLEARING CACHED STATE in about_ObolSspi](./about_ObolSspi.md#clearing-cached-state) for how to clear them and the other caches between tests.
 
 ## RELATED LINKS
 
