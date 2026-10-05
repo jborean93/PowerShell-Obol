@@ -62,7 +62,7 @@ These operations need administrator rights and fail when being used by a non-adm
 The SSP also adds and expires entries in this cache itself, so an entry added by Obol ages out after `FarKdcTimeout` (10 minutes by default), see [Expiry in about_ObolSspiKdcLookup](./about_ObolSspiKdcLookup.md#expiry).
 
 ## SSPI environment cmdlets
-[Enter-ObolSspiEnvironment](./Enter-ObolSspiEnvironment.md) and [Exit-ObolSspiEnvironment](./Exit-ObolSspiEnvironment.md) register Obol KDC objects with the SSP and remove them again, using a pin for `-Scope Thread` (the default) or the binding cache for `-Scope Machine`.
+[Enter-ObolSspiEnvironment](./Enter-ObolSspiEnvironment.md) and [Exit-ObolSspiEnvironment](./Exit-ObolSspiEnvironment.md) register Obol KDC objects with the SSP and remove them again, using a pin for `-Scope Thread` (the default), the binding cache for `-Scope Machine`, the static realm KDC list for `-Scope MitRealm` or the DC locator for `-Scope DcLocator`.
 [Use-ObolSspiEnvironment](./Use-ObolSspiEnvironment.md) does the same around a scriptblock, starting a KDC first with `-Realm`.
 They are the Windows Kerberos counterpart of `Enter-ObolKrb5Environment`, `Exit-ObolKrb5Environment` and `Use-ObolKrb5Environment`, which set the krb5 environment variables MIT krb5 and Heimdal read, including on Windows.
 Both kinds can be entered at the same time.
@@ -72,8 +72,15 @@ On top of [Add-ObolSspiKdc](./Add-ObolSspiKdc.md) they:
 + Take the realm and address from the KDC, using the loopback address for a KDC listening on all addresses.
 + Require the KDC to listen on port 88, `Use-ObolSspiEnvironment` always starts its KDC on port 88 and has no `-Port`.
 + Allow one SSPI environment in the process at a time, exited automatically when the runspace that entered it closes.
-+ Remove the entries on exit, which is every pin in the process with `Clear-ObolSspiKdc -Scope Process` for `Thread`, and the whole binding cache with `Clear-ObolSspiKdc -Scope Machine` for `Machine`, including entries the SSP or other tools added.
++ Remove the entries on exit, which is every pin in the process with `Clear-ObolSspiKdc -Scope Process` for `Thread`, and the whole binding cache with `Clear-ObolSspiKdc -Scope Machine` for the machine wide scopes, including entries the SSP or other tools added.
   For `Thread` they refuse to enter if the thread already has a pin, as exiting would remove it.
++ For `MitRealm`, add the realm and its KDCs under `HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Domains` and a host to realm mapping under `...\Kerberos\HostToRealm`, see [STATIC REALM KDC LIST in about_ObolSspiKdcLookup](./about_ObolSspiKdcLookup.md#static-realm-kdc-list).
++ For `DcLocator`, add an NRPT rule for the realm and run a DNS server and LDAP ping responder for it, see [DC LOCATOR AND DNS in about_ObolSspiKdcLookup](./about_ObolSspiKdcLookup.md#dc-locator-and-dns).
+
+`MitRealm` and `DcLocator` purge the binding cache when entered too, an entry for the realm from before would be used instead of the new configuration.
+They create volatile registry keys, which Windows removes on reboot, so a killed process cannot leave them behind for good.
+They never change configuration that already exists: a realm key or NRPT rule for the realm, including one left by a killed Obol process, makes them fail with how to remove it.
+Windows ignores every local NRPT rule while the Group Policy key `HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\DnsPolicyConfig` exists, even an empty one, so `DcLocator` also fails if it does.
 
 A PowerShell console runs every command on the same thread, so after `Enter-ObolSspiEnvironment` with `Thread` the following commands use the KDC.
 With `Machine` the entry ages out after `FarKdcTimeout` (10 minutes by default), see [Expiry in about_ObolSspiKdcLookup](./about_ObolSspiKdcLookup.md#expiry).

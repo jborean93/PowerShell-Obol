@@ -34,10 +34,22 @@ This registers each KDC's realm with Windows Kerberos instead, so it sends the r
 `-Scope` sets which authentication uses the KDCs:
 
 + `Thread` (the default): only Kerberos authentication done on the current thread. No administrator rights are needed.
-+ `Machine`: all Kerberos authentication on the machine, including other processes and SMB. This needs administrator rights.
++ `Machine`: all Kerberos authentication on the machine, including other processes and SMB, through the KDC binding cache. This needs administrator rights.
++ `MitRealm`: all Kerberos authentication on the machine, the realm is added like `ksetup.exe /addkdc` so Windows treats it as an MIT realm. This needs administrator rights.
++ `DcLocator`: all Kerberos authentication on the machine, Windows finds the KDC like a domain controller of an Active Directory domain. This needs administrator rights.
 
 A PowerShell console and a script run every command on the same thread, so with `Thread` the commands after this one use the KDCs.
-Authentication done on another thread does not, such as in a job, another runspace, `ForEach-Object -Parallel` or an async continuation, or kernel/LSASS driven authentication like SMB and CredSSP, use `Machine` for those.
+Authentication done on another thread does not, such as in a job, another runspace, `ForEach-Object -Parallel` or an async continuation, or kernel/LSASS driven authentication like SMB and CredSSP, use one of the machine wide scopes for those.
+
+The machine wide scopes differ in how Windows finds the KDC and so in how it talks to it:
+
++ `Machine` adds the KDC to the binding cache, which Windows only uses for about 10 minutes, see the notes.
++ `MitRealm` adds the realm and its KDCs under `HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Domains` and maps the hosts under the realm name to it under `...\Kerberos\HostToRealm`, like `ksetup.exe /addkdc` and `/addhosttorealmmap`, so a service such as `HTTP/web.example.test` is in `EXAMPLE.TEST`. Windows talks to the KDC like a non-Windows KDC: the first AS-REQ has no pre-authentication data and Windows never asks for a PAC. TCP is used when every KDC of the realm listens on it, UDP otherwise.
++ `DcLocator` runs a DNS server on UDP port 53 and answers the LDAP ping on UDP port 389 of the KDC address, like a domain controller that is also the DNS server, and adds an NRPT rule that sends the DNS queries for the realm name there. Windows talks to the KDC like an Active Directory domain controller. The realm must be a DNS name such as `EXAMPLE.TEST`, and nothing else can use those ports on the KDC address. If something does, such as a DNS server on `127.0.0.1`, start the KDC on another loopback address such as `127.0.0.2`. The KDC address must be IPv4, in testing Windows only looked up the IPv4 address of the KDC host.
+
+`MitRealm` and `DcLocator` never change existing configuration, they fail if the realm key or an NRPT rule for the realm already exists.
+The keys and rule they create are volatile, so if the process is killed before it removes them they are gone after the next reboot.
+Both purge the binding cache when entered, as an entry for the realm from before would be used instead, and when exited.
 
 Only one SSPI environment can be entered in the process at a time, it can be used together with a krb5 environment from `Enter-ObolKrb5Environment`.
 It is exited when the runspace that entered it closes.
@@ -102,7 +114,21 @@ Enter-ObolSspiEnvironment $kdc -Scope Machine
 Registers the KDC for every process on the machine, such as for SMB, from an elevated session.
 Windows stops using it after about 10 minutes, see the notes.
 
-### Example 4: Several KDCs on port 88
+### Example 4: Use the DC locator
+
+```powershell
+$kdc = Start-ObolKdc -Realm EXAMPLE.TEST -Port 88
+Enter-ObolSspiEnvironment $kdc -Scope DcLocator
+
+Resolve-DnsName _kerberos._tcp.dc._msdcs.EXAMPLE.TEST -Type SRV
+
+Exit-ObolSspiEnvironment
+```
+
+Registers the KDC for every process on the machine like a domain controller, from an elevated session.
+`Resolve-DnsName` shows the record Windows looks up, which points at `kdc1.example.test` on `127.0.0.1`.
+
+### Example 5: Several KDCs on port 88
 
 ```powershell
 $kdc = Start-ObolKdc -Realm EXAMPLE.TEST -Port 88
@@ -187,7 +213,10 @@ Which authentication uses the KDCs.
 
 + `Thread`: Kerberos authentication done on the current thread, like `Add-ObolSspiKdc -Scope Thread`. No administrator rights are needed. It fails if the thread already has a KDC from `Add-ObolSspiKdc`, as `Exit-ObolSspiEnvironment` would remove it.
 + `Machine`: all Kerberos authentication on the machine, like `Add-ObolSspiKdc -Scope Machine`. This needs administrator rights.
++ `MitRealm`: all Kerberos authentication on the machine, the realm and its KDCs are added to the registry like `ksetup.exe /addkdc`. This needs administrator rights.
++ `DcLocator`: all Kerberos authentication on the machine, an NRPT rule sends the realm's DNS queries to a DNS server and LDAP ping responder Obol runs. The realm must be a DNS name. This needs administrator rights.
 
+See the description for how they differ.
 The default is `Thread`.
 
 ```yaml
@@ -247,6 +276,10 @@ The KDCs to register.
 ## NOTES
 
 Windows cannot remove the registration of a single realm, so `Exit-ObolSspiEnvironment` removes every one in the same scope, see that cmdlet.
+With `MitRealm` and `DcLocator` it removes the keys and rules it created and purges the whole binding cache.
+
+If `MitRealm` or `DcLocator` fails because the configuration exists, the error names each key or rule and how to remove it.
+One left by an Obol process that was killed is removed by the next reboot, as it is volatile, or with the command in the error.
 
 With `Machine`, Windows only keeps a KDC entered up to the minutes represented by `FarKdcTimeout`, 10 minutes by default.
 After this time the machine binding will be invalid and no seen by KDC using the machine bind method.
@@ -261,3 +294,4 @@ A registration only matters when Windows has to contact a KDC, a ticket it alrea
 - [Add-ObolSspiKdc](./Add-ObolSspiKdc.md)
 - [Start-ObolKdc](./Start-ObolKdc.md)
 - [about_ObolSspi](./about_ObolSspi.md)
+- [about_ObolSspiKdcLookup](./about_ObolSspiKdcLookup.md)

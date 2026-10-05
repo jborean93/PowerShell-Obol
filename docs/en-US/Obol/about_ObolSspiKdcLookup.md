@@ -36,8 +36,10 @@ When the SSP has to contact a KDC, it picks the KDC for the realm like this, the
          | none
     fail (no KDC found)
 
-    (*) a KDC found by steps 3-5 is written to the binding cache (step 2) and
-        reused until the entry ages out, so later requests stop at step 2.
+    (*) a KDC found by the DC locator (step 5) is written to the binding cache
+        (step 2) and reused until the entry ages out, so later requests stop
+        at step 2. A KDC used from the static realm list (step 4) was not
+        written to it in testing.
 
 A brief explanation of the mechanism above are:
 
@@ -45,13 +47,13 @@ A brief explanation of the mechanism above are:
 | --- | --- | --- | --- | --- |
 | [Per-thread pin](#per-thread-pin) | `Add-ObolSspiKdc -Scope Thread` | Thread | Until removed or the thread/process exits | No |
 | [Binding cache](#binding-cache) | `Add-ObolSspiKdc -Scope Machine`, `klist.exe add_bind` | Machine | Until it ages out or reboot | Yes |
-| [ksetup](#ksetup) | `ksetup.exe /addkdc <REALM> <host>` | Machine | Persistent | Yes |
+| [ksetup](#ksetup) | `ksetup.exe /addkdc <REALM> <host>`, `Enter-ObolSspiEnvironment -Scope MitRealm` | Machine | Persistent, until reboot for Obol | Yes |
 | [MITRealms](#mitrealms-policy) | Group Policy `...\Kerberos\MITRealms` | Machine | Persistent | Yes |
-| [DC locator](#dc-locator-and-dns) | DNS SRV records published by an AD DC | Per realm, via DNS | Cached in the binding cache | No on the client, needs DNS and LDAP service |
+| [DC locator](#dc-locator-and-dns) | DNS SRV records published by an AD DC, `Enter-ObolSspiEnvironment -Scope DcLocator` | Per realm, via DNS | Cached in the binding cache | No on the client, needs DNS and LDAP service. Yes for the NRPT rule Obol uses |
 | [KDC proxy](#kdc-proxy-kkdcp) | Group Policy `...\Kerberos\KdcProxy\ProxyServers` | Machine | Persistent | Yes |
 
-Obol manages the per-thread pin and the binding cache, see [about_ObolSspi](./about_ObolSspi.md).
-The others are standard Windows configuration and outside the scope of the module.
+Obol manages the per-thread pin and the binding cache, and the SSPI environment cmdlets can also add a realm to the static realm KDC list or answer the DC locator for it, see [about_ObolSspi](./about_ObolSspi.md).
+The `MITRealms` policy and the KDC proxy are standard Windows configuration and outside the scope of the module.
 
 # PER-THREAD PIN
 The pin is set with the undocumented `KerbPinKdc` message, sent to the Kerberos package with `LsaCallAuthenticationPackage` over an untrusted LSA connection, so it needs no administrator rights.
@@ -102,7 +104,8 @@ The SSP watches the `Parameters` key, so a change applies straight away once the
 # STATIC REALM KDC LIST
 The `ksetup` registry keys and the `MITRealms` policy both declare a realm to the SSP and register it as an MIT realm, putting the host into a compatible MIT mode for that realm.
 Each entry records the realm and, optionally, the KDCs that serve it, and is checked at step 4.
-They only write the registry and do not add a binding cache entry, the KDC found through this step once validated lands in the binding cache on first use.
+They only write the registry and do not add a binding cache entry.
+In testing the SSP did not add one when it used a KDC from `KdcNames` either, unlike a KDC found by the DC locator.
 The SSP watches these keys, so a change takes effect without a reboot.
 
 Whether the KDC hosts are listed is what decides how the KDC is found for that realm:
@@ -162,7 +165,16 @@ Netlogon looks up the `_kerberos._tcp.dc._msdcs.<realm>` SRV record (and the sit
 The KDC found is written to the binding cache with its DC flags.
 
 As it requires a DNS SRV record and LDAP to respond to the CLDAP ping, it typically is only available for Active Directory based KDCs.
-An Obol KDC does not publish the `dc._msdcs` records or answer the CLDAP ping, so the DC locator never finds it.
+An Obol KDC on its own does not publish the `dc._msdcs` records or answer the CLDAP ping, so the DC locator never finds it.
+
+`Enter-ObolSspiEnvironment -Scope DcLocator` fills in both:
+
++ An NRPT (Name Resolution Policy Table) rule, the same as `Add-DnsClientNrptRule -Namespace <realm>, .<realm> -NameServers <KDC address>`, sends every DNS query for the realm name to a DNS server Obol runs on UDP port 53 of each KDC address. NRPT rules only take the IP address of the server, the port is always 53.
++ The DNS server answers the `_kerberos` and `_ldap` SRV records under the realm with `kdc1.<realm>`, `kdc2.<realm>` and so on, one per KDC, and those names with the KDC addresses. The port in an SRV record is ignored, the KDC is always on 88.
++ A CLDAP responder on UDP port 389 of each KDC address answers the ping with a `NETLOGON_SAM_LOGON_RESPONSE_EX` describing a writable domain controller that is a KDC, with a random domain GUID and the site `Default-First-Site-Name`. The ping always goes to port 389.
+
+The realm is then treated as an Active Directory domain: the first AS-REQ already asks for a PAC with `PA-PAC-REQUEST` and the KDC is contacted over TCP.
+`nltest.exe /dsgetdc:<realm>` shows the domain controller found.
 
 # KDC PROXY (KKDCP)
 The Group Policy `ProxyServers` key sends the KDC traffic for a realm through an HTTPS proxy instead of to a KDC directly.

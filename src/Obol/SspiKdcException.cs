@@ -3,7 +3,10 @@ using System.ComponentModel;
 
 namespace Obol;
 
-/// <summary>Thrown when a Kerberos SSP LSA call used by the SSPI cmdlets fails.</summary>
+/// <summary>
+/// Thrown when a Kerberos SSP LSA call, or the Windows configuration an SSPI environment sets up, used by the SSPI
+/// cmdlets fails.
+/// </summary>
 internal sealed class SspiKdcException : Exception
 {
     /// <summary>The NTSTATUS the operation failed with.</summary>
@@ -12,8 +15,8 @@ internal sealed class SspiKdcException : Exception
     /// <summary>The Win32 error the NTSTATUS maps to, if known.</summary>
     public int Win32Error { get; }
 
-    private SspiKdcException(string message, int ntStatus, int win32Error)
-        : base(message)
+    private SspiKdcException(string message, int ntStatus, int win32Error, Exception? innerException = null)
+        : base(message, innerException)
     {
         NtStatus = ntStatus;
         Win32Error = win32Error;
@@ -34,4 +37,8 @@ internal sealed class SspiKdcException : Exception
 
     /// <summary>Builds an exception with a plain message.</summary>
     public static SspiKdcException Create(string message) => new(message, 0, 0);
+
+    /// <summary>Builds an exception for a failed operation, the message of the cause is appended.</summary>
+    public static SspiKdcException Create(string operation, Exception innerException)
+        => new($"{operation} failed: {innerException.Message}", 0, 0, innerException);
 }

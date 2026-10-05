@@ -11,4 +11,16 @@ public enum ObolSspiKdcScope
 
     /// <summary>The whole machine (the binding cache), shared by every process. Needs administrator rights.</summary>
     Machine,
+
+    /// <summary>
+    /// The whole machine through the static realm KDC list (<c>ksetup /addkdc</c>), the realm is an MIT realm. Needs
+    /// administrator rights.
+    /// </summary>
+    MitRealm,
+
+    /// <summary>
+    /// The whole machine through the AD DC locator, an NRPT rule sends the realm's DNS queries to a DNS server and
+    /// CLDAP responder Obol runs. Needs administrator rights.
+    /// </summary>
+    DcLocator,
 }

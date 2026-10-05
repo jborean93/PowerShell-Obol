@@ -1,5 +1,6 @@
 using module ../output/Obol
 using namespace System.IO
+using namespace System.Net
 using namespace System.Security.Principal
 
 BeforeAll {
@@ -186,6 +187,62 @@ Describe "Use-ObolSspiEnvironment" -Skip:(-not $IsWindows) {
         }
     }
 
+    Context "MitRealm scope" -Skip:(-not $isAdmin) {
+        BeforeAll {
+            $realmKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Domains\EXAMPLE.TEST'
+        }
+
+        It "Adds the realm while the scriptblock runs and removes it after" {
+            $actual = Use-ObolSspiEnvironment EXAMPLE.TEST -Scope MitRealm {
+                (Get-ItemProperty -LiteralPath $realmKey).KdcNames
+            }
+
+            $actual | Should-Be 127.0.0.1
+            Test-Path -LiteralPath $realmKey | Should-BeFalse
+        }
+
+        It "Removes the realm even when the scriptblock throws" {
+            { Use-ObolSspiEnvironment EXAMPLE.TEST -Scope MitRealm { throw 'boom' } } |
+                Should-Throw -ExceptionMessage boom
+
+            Test-Path -LiteralPath $realmKey | Should-BeFalse
+            Get-ObolKdc | Should-BeNull
+        }
+
+        It "Fails before starting the KDC when the realm exists" {
+            $null = New-Item -Path $realmKey
+            try {
+                { Use-ObolSspiEnvironment EXAMPLE.TEST -Scope MitRealm { 'ran' } } |
+                    Should-Throw -FullyQualifiedErrorId 'SspiConfigurationExists,Obol.Commands.UseObolSspiEnvironment'
+
+                Get-ObolKdc | Should-BeNull
+            }
+            finally {
+                Remove-Item -LiteralPath $realmKey -Recurse
+            }
+        }
+    }
+
+    Context "DcLocator scope" -Skip:(-not $isAdmin) {
+        It "Answers DNS for the realm while the scriptblock runs and removes the NRPT rule after" {
+            $actual = Use-ObolSspiEnvironment EXAMPLE.TEST -Scope DcLocator {
+                [Dns]::GetHostAddresses('kdc1.example.test').IPAddressToString
+            }
+
+            $actual | Should-Be 127.0.0.1
+            Get-NrptRule -Namespace .example.test | Should-BeNull
+            Test-PortFree 53 -Udp | Should-BeTrue
+        }
+
+        It "Fails for a realm that is not a DNS name and stops the KDC" {
+            { Use-ObolSspiEnvironment EXAMPLE -Scope DcLocator { 'ran' } } |
+                Should-Throw -FullyQualifiedErrorId 'InvalidSspiRealm,Obol.Commands.UseObolSspiEnvironment'
+
+            Get-ObolKdc | Should-BeNull
+            Get-NrptRule -Namespace .example | Should-BeNull
+        }
+    }
+
     Context "Machine scope without administrator rights" -Skip:(-not $isAdmin) {
         BeforeAll {
             # Created with net.exe: New-LocalUser is not on the restricted test PSModulePath. A network logon of a
@@ -211,6 +268,21 @@ Describe "Use-ObolSspiEnvironment" -Skip:(-not $IsWindows) {
 
             $err.FullyQualifiedErrorId | Should-Be 'SspiCallFailed,Obol.Commands.UseObolSspiEnvironment'
             $err.Exception.Message | Should-BeLikeString '*SeTcbPrivilege*'
+            Get-ObolKdc | Should-BeNull
+        }
+
+        It "Fails with scope <Scope> before starting the KDC" -TestCases @(
+            @{ Scope = 'MitRealm' }
+            @{ Scope = 'DcLocator' }
+        ) {
+            param ($Scope)
+
+            $err = Invoke-AsLogonUser -Username $testUser -Password $testPassword -ScriptBlock {
+                { Use-ObolSspiEnvironment EXAMPLE.TEST -Scope $Scope { 'ran' } } | Should-Throw
+            }
+
+            $err.FullyQualifiedErrorId | Should-Be 'SspiScopeNeedsAdministrator,Obol.Commands.UseObolSspiEnvironment'
+            $err.Exception.Message | Should-BeLikeString "Scope $Scope *administrator*"
             Get-ObolKdc | Should-BeNull
         }
     }
