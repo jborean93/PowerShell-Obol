@@ -380,15 +380,15 @@ Function Get-KrbError {
 
     $reader = [AsnReader]::new($Response, [AsnEncodingRules]::DER)
     $krbError = $reader.ReadSequence([Asn1Tag]::new([TagClass]::Application, 30, $true)).ReadSequence()
-    $result = [Ordered]@{ ErrorCode = $null; EText = $null; CusecLength = $null }
+    $result = [Ordered]@{ ErrorCode = $null; EText = $null; SusecLength = $null }
 
-    # The KRB-ERROR fields used are [3] cusec, [6] error-code and [11] e-text, RFC 4120 5.9.1.
+    # The KRB-ERROR fields used are [5] susec, [6] error-code and [11] e-text, RFC 4120 5.9.1.
     while ($krbError.HasData) {
         $tag = $krbError.PeekTag()
         $field = $krbError.ReadSequence($tag)
-        if ($tag.TagValue -eq 3) {
-            # The content length of the cusec INTEGER, it varies with the time of the reply.
-            $result.CusecLength = [int]$field.ReadEncodedValue().ToArray()[1]
+        if ($tag.TagValue -eq 5) {
+            # The content length of the susec INTEGER, it varies with the time of the reply.
+            $result.SusecLength = [int]$field.ReadEncodedValue().ToArray()[1]
         }
         elseif ($tag.TagValue -eq 6) {
             $result.ErrorCode = [int]$field.ReadInteger()

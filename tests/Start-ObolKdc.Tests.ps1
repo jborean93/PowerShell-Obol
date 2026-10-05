@@ -162,12 +162,12 @@ Describe "Start-ObolKdc" {
     }
 
     It "Sends a UDP reply exactly at the size limit" {
-        # A KRB-ERROR includes the current microseconds as a DER INTEGER so its length varies by up to 2 bytes.
-        # The longest form, a 3 byte value, is used for nearly every reply.
+        # A KRB-ERROR includes the server microseconds (susec) as a DER INTEGER so its length varies by up to 2
+        # bytes. The longest form, a 3 byte value, is used for nearly every reply.
         $request = New-AsReq EXAMPLE.TEST user
         $kdc = Start-ObolKdc EXAMPLE.TEST -Transport Tcp
         $response = Invoke-KdcRequest -Port $kdc.Port -Request $request
-        $maxLength = $response.Length + 3 - (Get-KrbError $response).CusecLength
+        $maxLength = $response.Length + 3 - (Get-KrbError $response).SusecLength
         $kdc.Dispose()
 
         # At the limit every reply fits, retry until one is exactly the limit to check the boundary.
