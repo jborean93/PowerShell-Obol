@@ -1,9 +1,9 @@
 # Obol
 
-[![Test workflow](https://github.com/jborean93/Obol/workflows/Test%20Obol/badge.svg)](https://github.com/jborean93/Obol/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/jborean93/Obol/branch/main/graph/badge.svg)](https://codecov.io/gh/jborean93/Obol)
+[![Test workflow](https://github.com/jborean93/PowerShell-Obol/workflows/Test%20Obol/badge.svg)](https://github.com/jborean93/PowerShell-Obol/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jborean93/PowerShell-Obol/branch/main/graph/badge.svg)](https://codecov.io/gh/jborean93/PowerShell-Obol)
 [![PowerShell Gallery](https://img.shields.io/powershellgallery/dt/Obol.svg)](https://www.powershellgallery.com/packages/Obol)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jborean93/Obol/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jborean93/PowerShell-Obol/blob/main/LICENSE)
 
 PowerShell module that runs a Kerberos KDC endpoint based on [Kerberos.NET](https://github.com/dotnet/Kerberos.NET).
 It gives Kerberos clients and services a realm to test against inside a PowerShell process, without a domain controller or an MIT/Heimdal KDC install.

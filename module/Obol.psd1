@@ -32,7 +32,7 @@
     Copyright = '(c) 2026 Jordan Borean. All rights reserved.'
 
     # Description of the functionality provided by this module
-    Description = 'Runs a Kerberos KDC endpoint in PowerShell based on Kerberos.NET.`nSee https://github.com/jborean93/Obol for more info'
+    Description = 'Runs a Kerberos KDC endpoint in PowerShell based on Kerberos.NET. See https://github.com/jborean93/PowerShell-Obol for more info'
 
     # Minimum version of the PowerShell engine required by this module
     PowerShellVersion = '7.6'
@@ -121,16 +121,16 @@
             )
 
             # A URL to the license for this module.
-            LicenseUri = 'https://github.com/jborean93/Obol/blob/main/LICENSE'
+            LicenseUri = 'https://github.com/jborean93/PowerShell-Obol/blob/main/LICENSE'
 
             # A URL to the main website for this project.
-            ProjectUri = 'https://github.com/jborean93/Obol'
+            ProjectUri = 'https://github.com/jborean93/PowerShell-Obol'
 
             # A URL to an icon representing this module.
             # IconUri = ''
 
             # ReleaseNotes of this module
-            ReleaseNotes = 'See https://github.com/jborean93/Obol/blob/main/CHANGELOG.md'
+            ReleaseNotes = 'See https://github.com/jborean93/PowerShell-Obol/blob/main/CHANGELOG.md'
 
             # Prerelease string of this module
             Prerelease = 'beta1'

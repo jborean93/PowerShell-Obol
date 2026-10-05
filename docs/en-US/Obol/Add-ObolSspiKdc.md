@@ -1,7 +1,7 @@
 ---
 document type: cmdlet
 external help file: Obol.dll-Help.xml
-HelpUri: https://www.github.com/jborean93/Obol/blob/main/docs/en-US/Obol/Add-ObolSspiKdc.md
+HelpUri: https://www.github.com/jborean93/PowerShell-Obol/blob/main/docs/en-US/Obol/Add-ObolSspiKdc.md
 Locale: en-US
 Module Name: Obol
 ms.date: ''
