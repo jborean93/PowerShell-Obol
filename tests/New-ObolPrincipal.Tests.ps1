@@ -25,10 +25,10 @@ Describe "New-ObolPrincipal" {
         $actual.FullName | Should-Be user@EXAMPLE.TEST
         $actual.Kvno | Should-Be 1
         $actual.EncryptionType | Should-BeCollection @(
-            [Obol.ObolEncryptionType]::Aes256Sha1
-            [Obol.ObolEncryptionType]::Aes128Sha1
+            [Obol.Kerberos.EncryptionType]::Aes256Sha1
+            [Obol.Kerberos.EncryptionType]::Aes128Sha1
         )
-        $actual.Flag | Should-Be ([Obol.ObolPrincipalFlag]::None)
+        $actual.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::None)
         $actual.Alias.Count | Should-Be 0
         $actual.Sid | Should-BeLikeString "$($kdc.DomainSid)-*"
         $actual.ToString() | Should-Be user@EXAMPLE.TEST
@@ -42,17 +42,17 @@ Describe "New-ObolPrincipal" {
     }
 
     It "Creates a principal that does not require pre-authentication" {
-        $actual = New-ObolPrincipal -Kdc $kdc user -Password $password -Flag DoesNotRequirePreAuth
+        $actual = New-ObolPrincipal -Kdc $kdc user -Password $password -Flag DontRequirePreAuth
 
-        $actual.Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
+        $actual.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
     }
 
     It "Creates a principal with encryption types" {
         $actual = New-ObolPrincipal -Kdc $kdc user -Password $password -EncryptionType Aes256Sha384, Aes128Sha1
 
         $actual.EncryptionType | Should-BeCollection @(
-            [Obol.ObolEncryptionType]::Aes256Sha384
-            [Obol.ObolEncryptionType]::Aes128Sha1
+            [Obol.Kerberos.EncryptionType]::Aes256Sha384
+            [Obol.Kerberos.EncryptionType]::Aes128Sha1
         )
     }
 
@@ -135,13 +135,13 @@ Describe "New-ObolPrincipal" {
     }
 
     It "Creates a principal with -Setting" {
-        $setting = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth -EncryptionType Aes128Sha1 -Alias other -Rid 600
+        $setting = New-ObolPrincipalSetting -Password $password -Flag DontRequirePreAuth -EncryptionType Aes128Sha1 -Alias other -Rid 600
 
         $actual = $kdc | New-ObolPrincipal user -Setting $setting
 
         $actual.FullName | Should-Be user@EXAMPLE.TEST
-        $actual.Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
-        $actual.EncryptionType | Should-Be ([Obol.ObolEncryptionType]::Aes128Sha1)
+        $actual.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
+        $actual.EncryptionType | Should-Be ([Obol.Kerberos.EncryptionType]::Aes128Sha1)
         $actual.Alias | Should-BeCollection @('other')
         $actual.Sid | Should-Be "$($kdc.DomainSid)-600"
     }
@@ -172,20 +172,21 @@ Describe "New-ObolPrincipal" {
         $err[0].FullyQualifiedErrorId | Should-Be "$ErrorId,Obol.Commands.NewObolPrincipal"
     }
 
-    It "Fails with an undefined flag" {
-        $flag = [Enum]::ToObject([Obol.ObolPrincipalFlag], 0x8000)
-
-        $actual = $kdc | New-ObolPrincipal svc -Flag $flag -ErrorAction SilentlyContinue -ErrorVariable err
+    It "Fails with an account control flag the KDC does not support: <Case>" -TestCases @(
+        @{ Case = 'a PAC value'; Flag = 'AccountDisabled, DontRequirePreAuth'; Unsupported = 'AccountDisabled' }
+        @{ Case = 'an undefined value'; Flag = [Enum]::ToObject([Obol.Kerberos.PacUserAccountControl], 0x80000000); Unsupported = '2147483648' }
+    ) {
+        $actual = $kdc | New-ObolPrincipal svc -Flag $Flag -ErrorAction SilentlyContinue -ErrorVariable err
 
         $actual | Should-BeNull
         $err.Count | Should-Be 1
         $err[0].FullyQualifiedErrorId | Should-Be 'InvalidFlag,Obol.Commands.NewObolPrincipal'
-        [string]$err[0] | Should-Be "Flag value 32768 contains values that are not supported, valid values are None, DoesNotRequirePreAuth, NotDelegated, TrustedForDelegation, NoAuthDataRequired"
+        [string]$err[0] | Should-Be "Flag '$Unsupported' is not supported, valid values are None, TrustedForDelegation, NotDelegated, DontRequirePreAuth, NoAuthDataRequired"
     }
 
-    It "Fails with an undefined flag in -Setting" {
+    It "Fails with an unsupported flag in -Setting" {
         $setting = New-ObolPrincipalSetting
-        $setting.Flag = [Enum]::ToObject([Obol.ObolPrincipalFlag], 0x8001)
+        $setting.Flag = [Obol.Kerberos.PacUserAccountControl]::SmartcardRequired
 
         $actual = $kdc | New-ObolPrincipal svc -Setting $setting -ErrorAction SilentlyContinue -ErrorVariable err
 
@@ -193,15 +194,25 @@ Describe "New-ObolPrincipal" {
         $err[0].FullyQualifiedErrorId | Should-Be 'InvalidFlag,Obol.Commands.NewObolPrincipal'
     }
 
-    It "Fails with an undefined encryption type" {
-        $etype = [Enum]::ToObject([Obol.ObolEncryptionType], 99)
+    It "Fails with an encryption type a principal cannot have keys for: <Case>" -TestCases @(
+        @{ Case = 'a registered type'; EncryptionType = [Obol.Kerberos.EncryptionType]::Rc4Hmac }
+        @{ Case = 'an undefined value'; EncryptionType = [Enum]::ToObject([Obol.Kerberos.EncryptionType], 99) }
+    ) {
+        # The parameter only accepts the types the KDC can create keys for.
+        { $kdc | New-ObolPrincipal svc -EncryptionType $EncryptionType } |
+            Should-Throw -FullyQualifiedErrorId 'ParameterArgumentValidationError,Obol.Commands.NewObolPrincipal'
+    }
 
-        $actual = $kdc | New-ObolPrincipal svc -EncryptionType $etype -ErrorAction SilentlyContinue -ErrorVariable err
+    It "Fails with an unsupported encryption type in a setting" {
+        # A setting cast from a hashtable is not checked by the parameter validation.
+        $setting = [Obol.ObolPrincipalSetting]@{ EncryptionType = 'Rc4Hmac' }
+
+        $actual = $kdc | New-ObolPrincipal svc -Setting $setting -ErrorAction SilentlyContinue -ErrorVariable err
 
         $actual | Should-BeNull
         $err.Count | Should-Be 1
         $err[0].FullyQualifiedErrorId | Should-Be 'InvalidEncryptionType,Obol.Commands.NewObolPrincipal'
-        [string]$err[0] | Should-Be "EncryptionType '99' is not supported, valid values are Aes128Sha1, Aes256Sha1, Aes128Sha256, Aes256Sha384"
+        [string]$err[0] | Should-Be "EncryptionType 'Rc4Hmac' is not supported, valid values are Aes256Sha1, Aes128Sha1, Aes256Sha384, Aes128Sha256"
     }
 
     It "Accepts the KDC realm in the name" {
@@ -404,7 +415,7 @@ Describe "New-ObolPrincipal keys" {
         $actual = $kdc | New-ObolPrincipal HTTP/web -Key (Import-ObolKeytab $path) -WarningAction SilentlyContinue -WarningVariable warn
 
         $warn.Count | Should-Be 2
-        [string]$warn[0] | Should-Be 'Ignoring the keytab entry for HTTP/web@EXAMPLE.TEST with kvno 2, encryption type 23 is not supported'
+        [string]$warn[0] | Should-Be 'Ignoring the keytab entry for HTTP/web@EXAMPLE.TEST with kvno 2, encryption type Rc4Hmac is not supported'
         [string]$warn[1] | Should-Be 'Ignoring the keytab entry for HTTP/web@EXAMPLE.TEST with kvno 2, the Aes256Sha1 key is 16 bytes but should be 32'
         $actual.EncryptionType | Should-Be Aes128Sha1
     }

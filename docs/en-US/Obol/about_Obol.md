@@ -15,10 +15,10 @@ The module and its dependencies are loaded in a separate AssemblyLoadContext to 
 
 # PRINCIPAL FLAGS
 Options are turned on for a principal with the `-Flag` parameter of `New-ObolPrincipal`, `New-ObolPrincipalSetting` and `Set-ObolPrincipal`, and the `Flag` property of a principal shows the options that are on.
-The values are named after the AD `userAccountControl` flags but use Obol's own numbers, use the names rather than AD values.
+The values are the `Obol.Kerberos.PacUserAccountControl` bits the ticket's PAC carries, the MS-SAMR `USER_*` codes, so the `Flag` of a principal and the `UserAccountControl` of its PAC in a trace match. Only the four below can be set on a principal, the AD `userAccountControl` attribute uses other numbers for the same names so use the names rather than AD values.
 
 + `None`: No options are set.
-+ `DoesNotRequirePreAuth`: The principal can get a ticket without pre-authentication.
++ `DontRequirePreAuth`: The principal can get a ticket without pre-authentication.
   The KDC replies to an AS-REQ for the principal with a ticket encrypted with the principal's key without the client proving it knows the key first.
   This is the AD flag `DONT_REQ_PREAUTH` (`0x400000`), an MIT principal without the `requires_preauth` attribute and the PAC `USER_DONT_REQUIRE_PREAUTH` (`0x10000`).
 + `NotDelegated`: The principal never gets a forwardable ticket so its credentials cannot be delegated.
@@ -128,3 +128,48 @@ A keytab does not hold the salt of its keys, set `-Salt` if a client logs in wit
 ```powershell
 $kdc | New-ObolPrincipal HTTP/web.example.test -Key (Import-ObolKeytab ./http.keytab)
 ```
+
+# TRACING REQUESTS
+Every request a KDC answers raises the `RequestProcessed` .NET event of its `ObolKdc` object with an `ObolKdcEvent`.
+The event holds the facts of the exchange, the client and service names and the error code, and the request and reply decoded into objects with the parts the KDC decrypted, such as the ticket issued and its PAC.
+See [about_ObolKdcEvent](./about_ObolKdcEvent.md) for the structure.
+The structure is for viewing and diagnostics, not a public API, it may change in any release.
+
+A request always gets exactly one reply, even one that cannot be decoded gets a `KRB-ERROR`, so one event covers both.
+The KDC only ever receives an `AS-REQ` or a `TGS-REQ` and only ever sends an `AS-REP`, a `TGS-REP` or a `KRB-ERROR`, the other Kerberos messages travel between the client and the service.
+The event is raised on the thread that processed the request, before the reply is sent, and a handler that fails is ignored so the client still gets its reply.
+
+`Trace-ObolKdc` is the simplest way to use the event.
+With a scriptblock it outputs the events of the requests made while the scriptblock ran, which suits a test:
+
+```powershell
+$events = Use-ObolKrb5Environment EXAMPLE.TEST -Principal @{ user = $null } -ClientPrincipal user {
+    param ($kdc)
+
+    Trace-ObolKdc -Kdc $kdc { kinit -k -i user }
+}
+
+$events.ErrorCode | Should-Be None
+$events.Request.Body.EncryptionType | Should-NotContainCollection 23
+```
+
+Without a scriptblock it outputs the events as they happen until Ctrl+C or `Select-Object -First`, for watching a KDC while testing from another process.
+
+`Register-ObjectEvent` handles the event in the background instead, for example to keep every request of a session or to react to one:
+
+```powershell
+$subscription = Register-ObjectEvent -InputObject $kdc -EventName RequestProcessed -Action {
+    $kdcEvent = $Event.SourceEventArgs
+    if ($kdcEvent.ErrorCode -ne 'None') {
+        Write-Host $kdcEvent.Message
+    }
+}
+
+Unregister-Event -SourceIdentifier $subscription.Name
+```
+
+Without `-Action` the events queue in the runspace and `Get-Event` or `Wait-Event` return them, the `ObolKdcEvent` is the `SourceEventArgs` property.
+
+The `Bytes` of `Request` and `Reply` are the messages as sent and `Key` the long-term keys they were encrypted with as keytab entries, so an exchange can be decoded and decrypted with other tools even after the principal's keys were changed.
+These keys are the secrets of the test realm.
+See [about_ObolWireshark](./about_ObolWireshark.md) for decrypting a capture of the traffic.

@@ -38,7 +38,7 @@ Each key is output as an `ObolKeytabEntry` with the principal name, kvno, encryp
 
 The entries can be passed to the `-Key` parameter of `New-ObolPrincipal` and `Set-ObolPrincipal` to give a principal the keys of the keytab, or inspected in tests, such as to check the keys a program wrote.
 
-The `Timestamp` of an entry is shown in local time, converted from the UTC epoch seconds in the raw keytab, and `NameType` is an `ObolPrincipalNameType`, usually `Principal` (`KRB5_NT_PRINCIPAL`).
+The `Timestamp` of an entry is shown in local time, converted from the UTC epoch seconds in the raw keytab, and `NameType` is a `PrincipalNameType`, usually `Principal` (`KRB5_NT_PRINCIPAL`).
 Entries for encryption types Obol does not support, such as RC4 (23), are output with the type as a number, and so is a name type without a name.
 Deleted entries are skipped and data after the 32-bit kvno of an entry, such as Heimdal extensions, is ignored.
 A file that is not a valid keytab writes an error and the other files are still read.

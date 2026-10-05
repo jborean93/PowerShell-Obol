@@ -1,6 +1,7 @@
 using System;
 using System.Management.Automation.Runspaces;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
 using Obol.Protocol;
 
@@ -15,6 +16,7 @@ public sealed class ObolKdc : IDisposable
     private Runspace? _runspace;
     private bool _disposed;
     private Exception? _error;
+    private int _stopped;
 
     private ObolKdc(string realm, KdcListener listener, PrincipalStore store)
     {
@@ -22,6 +24,19 @@ public sealed class ObolKdc : IDisposable
         _listener = listener;
         _store = store;
     }
+
+    /// <summary>
+    /// Raised for each request the KDC answered, with the request and its reply, before the reply is sent.
+    /// </summary>
+    /// <remarks>
+    /// The event is raised on the thread that processed the request, not on a PowerShell pipeline thread, so use
+    /// <c>Register-ObjectEvent</c> or <c>Trace-ObolKdc</c> to receive it in PowerShell. An exception thrown by a
+    /// handler is ignored, the client still gets its reply.
+    /// </remarks>
+    public event EventHandler<ObolKdcEvent>? RequestProcessed;
+
+    /// <summary>Raised once when the KDC stops answering requests, by Dispose or a fault.</summary>
+    internal event EventHandler? Stopped;
 
     /// <summary>The realm the KDC serves.</summary>
     public string Realm { get; }
@@ -105,7 +120,7 @@ public sealed class ObolKdc : IDisposable
     internal void Start()
     {
         StartTime = DateTime.Now;
-        _listener.Start(OnFault);
+        _listener.Start(OnFault, OnExchange);
     }
 
     /// <summary>The principals of the KDC's realm.</summary>
@@ -147,9 +162,41 @@ public sealed class ObolKdc : IDisposable
         }
 
         _listener.Dispose();
+        RaiseStopped();
     }
 
     public override string ToString() => $"{Realm} ({Endpoint})";
+
+    /// <summary>Raises <see cref="RequestProcessed"/>, each handler on its own so one failing does not skip the
+    /// others.</summary>
+    private void OnExchange(KdcExchange exchange)
+    {
+        if (RequestProcessed is not EventHandler<ObolKdcEvent> handlers)
+        {
+            return;
+        }
+
+        ObolKdcEvent kdcEvent = new(this, exchange);
+        foreach (Delegate handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<ObolKdcEvent>)handler)(this, kdcEvent);
+            }
+            catch (Exception)
+            {
+                // A handler failure is not the KDC's concern, the client still gets its reply.
+            }
+        }
+    }
+
+    private void RaiseStopped()
+    {
+        if (Interlocked.Exchange(ref _stopped, 1) == 0)
+        {
+            Stopped?.Invoke(this, EventArgs.Empty);
+        }
+    }
 
     /// <summary>Stops the listener after a receive loop failed unexpectedly.</summary>
     /// <remarks>
@@ -168,6 +215,7 @@ public sealed class ObolKdc : IDisposable
 
         // The listener waits for the failed loop to finish, run it elsewhere so the loop can return.
         _ = Task.Run(_listener.Dispose);
+        RaiseStopped();
     }
 
     private void OnRunspaceStateChanged(object? sender, RunspaceStateEventArgs e)

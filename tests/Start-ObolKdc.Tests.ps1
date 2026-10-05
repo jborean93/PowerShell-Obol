@@ -20,193 +20,6 @@ BeforeAll {
         KDC_ERR_WRONG_REALM = 68
     }
 
-    # Builds a minimal AS-REQ for the user. The KDCs in these tests have no principals other than krbtgt, so a
-    # KDC that receives and processes the request replies with a KDC_ERR_C_PRINCIPAL_UNKNOWN error. The tests use
-    # this to check the KDC answers on an address or transport without needing a real login.
-    Function New-AsReq {
-        param ([string]$Realm, [string]$UserName)
-
-        # Kerberos strings are GeneralString which AsnWriter cannot write directly.
-        Function Write-KerberosString([AsnWriter]$Writer, [string]$Value) {
-            $bytes = [Text.Encoding]::ASCII.GetBytes($Value)
-            $length = if ($bytes.Length -lt 0x80) {
-                , $bytes.Length
-            }
-            else {
-                0x82, ($bytes.Length -shr 8), ($bytes.Length -band 0xFF)
-            }
-            $Writer.WriteEncodedValue([byte[]](@(0x1B) + $length + $bytes))
-        }
-
-        Function Write-PrincipalName([AsnWriter]$Writer, [int]$Tag, [int]$NameType, [string[]]$Name) {
-            $null = $Writer.PushSequence([Asn1Tag]::new([TagClass]::ContextSpecific, $Tag, $true))
-            $null = $Writer.PushSequence()
-            $null = $Writer.PushSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 0, $true))
-            $Writer.WriteInteger($NameType)
-            $Writer.PopSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 0, $true))
-            $null = $Writer.PushSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 1, $true))
-            $null = $Writer.PushSequence()
-            foreach ($n in $Name) {
-                Write-KerberosString $Writer $n
-            }
-            $Writer.PopSequence()
-            $Writer.PopSequence([Asn1Tag]::new([TagClass]::ContextSpecific, 1, $true))
-            $Writer.PopSequence()
-            $Writer.PopSequence([Asn1Tag]::new([TagClass]::ContextSpecific, $Tag, $true))
-        }
-
-        Function Write-Explicit([AsnWriter]$Writer, [int]$Tag, [scriptblock]$Value) {
-            $t = [Asn1Tag]::new([TagClass]::ContextSpecific, $Tag, $true)
-            $null = $Writer.PushSequence($t)
-            & $Value
-            $Writer.PopSequence($t)
-        }
-
-        $w = [AsnWriter]::new([AsnEncodingRules]::DER)
-        $appTag = [Asn1Tag]::new([TagClass]::Application, 10, $true)
-        $null = $w.PushSequence($appTag)
-        $null = $w.PushSequence()
-        Write-Explicit $w 1 { $w.WriteInteger(5) }  # pvno
-        Write-Explicit $w 2 { $w.WriteInteger(10) }  # msg-type
-        Write-Explicit $w 4 {
-            $null = $w.PushSequence()
-            Write-Explicit $w 0 { $w.WriteBitString([byte[]]::new(4)) }  # kdc-options
-            Write-PrincipalName $w 1 1 $UserName  # cname, NT-PRINCIPAL
-            Write-Explicit $w 2 { Write-KerberosString $w $Realm }
-            Write-PrincipalName $w 3 2 'krbtgt', $Realm  # sname, NT-SRV-INST
-            Write-Explicit $w 5 { $w.WriteGeneralizedTime([DateTimeOffset]::UtcNow.AddHours(1), $true) }  # till
-            Write-Explicit $w 7 { $w.WriteInteger(1234) }  # nonce
-            Write-Explicit $w 8 {
-                $null = $w.PushSequence()
-                $w.WriteInteger(18)  # aes256-cts-hmac-sha1-96
-                $w.PopSequence()
-            }
-            $w.PopSequence()
-        }
-        $w.PopSequence()
-        $w.PopSequence($appTag)
-
-        , $w.Encode()
-    }
-
-    Function Invoke-KdcRequest {
-        param ([int]$Port, [byte[]]$Request, [switch]$Udp, [IPAddress]$Address = [IPAddress]::Loopback)
-
-        if ($Udp) {
-            $client = [UdpClient]::new($Address.AddressFamily)
-            try {
-                $client.Client.ReceiveTimeout = 5000
-                $null = $client.Send($Request, $Request.Length, [IPEndPoint]::new($Address, $Port))
-                $remote = $null
-                , $client.Receive([ref]$remote)
-            }
-            finally {
-                $client.Dispose()
-            }
-            return
-        }
-
-        $client = [TcpClient]::new($Address.AddressFamily)
-        try {
-            $client.Connect($Address, $Port)
-            $stream = $client.GetStream()
-            $length = [byte[]]::new(4)
-            [Buffers.Binary.BinaryPrimitives]::WriteInt32BigEndian($length, $Request.Length)
-            $stream.Write($length, 0, 4)
-            $stream.Write($Request, 0, $Request.Length)
-
-            $stream.ReadExactly($length, 0, 4)
-            $response = [byte[]]::new([Buffers.Binary.BinaryPrimitives]::ReadInt32BigEndian($length))
-            $stream.ReadExactly($response, 0, $response.Length)
-            , $response
-        }
-        finally {
-            $client.Dispose()
-        }
-    }
-
-    Function Get-KrbError {
-        param ([byte[]]$Response)
-
-        $reader = [AsnReader]::new($Response, [AsnEncodingRules]::DER)
-        $krbError = $reader.ReadSequence([Asn1Tag]::new([TagClass]::Application, 30, $true)).ReadSequence()
-        $result = [Ordered]@{ ErrorCode = $null; EText = $null; CusecLength = $null }
-
-        # The KRB-ERROR fields used are [3] cusec, [6] error-code and [11] e-text, RFC 4120 5.9.1.
-        while ($krbError.HasData) {
-            $tag = $krbError.PeekTag()
-            $field = $krbError.ReadSequence($tag)
-            if ($tag.TagValue -eq 3) {
-                # The content length of the cusec INTEGER, it varies with the time of the reply.
-                $result.CusecLength = [int]$field.ReadEncodedValue().ToArray()[1]
-            }
-            elseif ($tag.TagValue -eq 6) {
-                $result.ErrorCode = [int]$field.ReadInteger()
-            }
-            elseif ($tag.TagValue -eq 11) {
-                # GeneralString, skip the tag and length header.
-                $value = $field.ReadEncodedValue().ToArray()
-                $offset = if ($value[1] -lt 0x80) { 2 } else { 2 + ($value[1] -band 0x7F) }
-                $result.EText = [Text.Encoding]::ASCII.GetString($value, $offset, $value.Length - $offset)
-            }
-        }
-        [PSCustomObject]$result
-    }
-
-    Function Get-KrbErrorCode {
-        param ([byte[]]$Response)
-
-        (Get-KrbError $Response).ErrorCode
-    }
-
-    Function Write-TcpRequest {
-        param ([IO.Stream]$Stream, [byte[]]$Request)
-
-        $length = [byte[]]::new(4)
-        [Buffers.Binary.BinaryPrimitives]::WriteInt32BigEndian($length, $Request.Length)
-        $Stream.Write($length, 0, 4)
-        $Stream.Write($Request, 0, $Request.Length)
-    }
-
-    Function Read-TcpResponse {
-        param ([IO.Stream]$Stream)
-
-        $length = [byte[]]::new(4)
-        $Stream.ReadExactly($length, 0, 4)
-        $response = [byte[]]::new([Buffers.Binary.BinaryPrimitives]::ReadInt32BigEndian($length))
-        $Stream.ReadExactly($response, 0, $response.Length)
-        , $response
-    }
-
-    Function Test-PortFree {
-        param ([int]$Port, [switch]$Udp)
-
-        try {
-            if ($Udp) {
-                [UdpClient]::new([IPEndPoint]::new([IPAddress]::Loopback, $Port)).Dispose()
-            }
-            else {
-                $listener = [TcpListener]::new([IPAddress]::Loopback, $Port)
-                $listener.Start()
-                $listener.Stop()
-            }
-            $true
-        }
-        catch [SocketException] {
-            $false
-        }
-    }
-
-    Function Get-FreePort {
-        $listener = [TcpListener]::new([IPAddress]::Loopback, 0)
-        $listener.Start()
-        try {
-            $listener.LocalEndpoint.Port
-        }
-        finally {
-            $listener.Stop()
-        }
-    }
 }
 
 Describe "Start-ObolKdc" {
@@ -491,11 +304,11 @@ Describe "Start-ObolKdc" {
         $kdc = Start-ObolKdc EXAMPLE.TEST -Principal ([ordered]@{
             user = $password
             'HTTP/web.example.test' = $null
-            roast = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth
+            roast = New-ObolPrincipalSetting -Password $password -Flag DontRequirePreAuth
             'HTTP/sql' = New-ObolPrincipalSetting -EncryptionType Aes128Sha1 -Alias MSSQLSvc/sql, HTTP/db
             admin = New-ObolPrincipalSetting -Password $password -Rid 500
             setting = New-ObolPrincipalSetting -Rid 600 -Alias other
-            cast = [Obol.ObolPrincipalSetting]@{ Flag = 'DoesNotRequirePreAuth' }
+            cast = [Obol.ObolPrincipalSetting]@{ Flag = 'DontRequirePreAuth' }
         })
 
         $actual = Get-ObolPrincipal -Kdc $kdc
@@ -510,13 +323,13 @@ Describe "Start-ObolKdc" {
             'cast@EXAMPLE.TEST'
         )
         $actual[1].Sid | Should-Be "$($kdc.DomainSid)-1000"
-        $actual[3].Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
-        $actual[4].EncryptionType | Should-Be ([Obol.ObolEncryptionType]::Aes128Sha1)
+        $actual[3].Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
+        $actual[4].EncryptionType | Should-Be ([Obol.Kerberos.EncryptionType]::Aes128Sha1)
         $actual[4].Alias | Should-BeCollection @('MSSQLSvc/sql', 'HTTP/db')
         $actual[5].Sid | Should-Be "$($kdc.DomainSid)-500"
         $actual[6].Sid | Should-Be "$($kdc.DomainSid)-600"
         $actual[6].Alias | Should-BeCollection @('other')
-        $actual[7].Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
+        $actual[7].Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
     }
 
     It "Fails with an invalid -Principal <Case>" -TestCases @(

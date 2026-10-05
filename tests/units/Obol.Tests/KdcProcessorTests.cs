@@ -1,10 +1,13 @@
 using System;
 using System.Buffers.Binary;
 using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
 using Kerberos.NET.Crypto;
 using Kerberos.NET.Entities;
+using Kerberos.NET.Entities.Pac;
 using Obol.Protocol;
 
 namespace Obol.Tests;
@@ -30,8 +33,9 @@ public class KdcProcessorTests
         {
             Store = new PrincipalStore(Realm, caseInsensitive: false);
             Processor = new KdcProcessor(Store, Clock);
-            User = Store.Create(["user"], TestKdc.ToSecureString(TestKdc.Password), flags: ObolPrincipalFlag.None);
-            Service = Store.Create(ServiceName.Split('/'), password: null, flags: ObolPrincipalFlag.None);
+            User = Store.Create(["user"], TestKdc.ToSecureString(TestKdc.Password),
+                flags: Kerberos.PacUserAccountControl.None);
+            Service = Store.Create(ServiceName.Split('/'), password: null, flags: Kerberos.PacUserAccountControl.None);
         }
 
         public TestClock Clock { get; } = new();
@@ -44,14 +48,16 @@ public class KdcProcessorTests
 
         public ObolPrincipal Service { get; }
 
-        public ReadOnlyMemory<byte> Send(KrbAsReq request) => Processor.Process(request.EncodeApplication());
+        public ReadOnlyMemory<byte> Send(KrbAsReq request)
+            => Processor.Process(request.EncodeApplication()).ReplyBytes;
 
-        public ReadOnlyMemory<byte> Send(KrbTgsReq request) => Processor.Process(request.EncodeApplication());
+        public ReadOnlyMemory<byte> Send(KrbTgsReq request)
+            => Processor.Process(request.EncodeApplication()).ReplyBytes;
 
         /// <summary>Gets a TGT for the user with the session key from the decrypted reply.</summary>
         public (KrbAsRep Reply, KrbEncAsRepPart Part) GetTgt(Action<KrbKdcReqBody>? configureBody = null)
         {
-            KerberosKey key = User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+            KerberosKey key = User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
             KrbAsReq request = NewAsReq("user", key, Clock.Now);
             configureBody?.Invoke(request.Body);
             KrbAsRep reply = KrbAsRep.DecodeApplication(Send(request));
@@ -154,7 +160,8 @@ public class KdcProcessorTests
         KrbPrincipalName? authenticatorCName = null,
         Func<KrbKdcReqBody, KrbChecksum?>? checksum = null,
         Action<KrbKdcReqBody>? configureBody = null,
-        KrbPaData[]? paData = null)
+        KrbPaData[]? paData = null,
+        Action<KrbAuthenticator>? configureAuthenticator = null)
     {
         KrbKdcReqBody body = new()
         {
@@ -177,6 +184,7 @@ public class KdcProcessorTests
                 ? KrbChecksum.Create(body.Encode(), sessionKey, KeyUsage.PaTgsReqChecksum)
                 : checksum(body),
         };
+        configureAuthenticator?.Invoke(authenticator);
         KrbApReq apReq = new()
         {
             Ticket = ticket ?? tgt.Ticket,
@@ -207,11 +215,28 @@ public class KdcProcessorTests
         await Assert.That(KrbError.DecodeApplication(reply).ErrorCode).IsEqualTo(expected);
     }
 
+    /// <summary>Re-encrypts the TGT with the krbtgt key after changing its plaintext, like the KDC that issued it.
+    /// </summary>
+    private static KrbTicket ForgeTgt(TestRealm realm, KrbAsRep tgt, Action<KrbEncTicketPart> configure)
+    {
+        KrbEncTicketPart part = TestKdc.DecryptTicket(tgt.Ticket, realm.Store.Krbtgt);
+        configure(part);
+        KerberosKey key = realm.Store.Krbtgt.State.GetKey(tgt.Ticket.EncryptedPart.EType.ToObol())!;
+        KrbEncryptedData encrypted = KrbEncryptedData.Encrypt(part.EncodeApplication(), key, KeyUsage.Ticket);
+        encrypted.KeyVersionNumber = tgt.Ticket.EncryptedPart.KeyVersionNumber;
+        return new KrbTicket
+        {
+            Realm = tgt.Ticket.Realm,
+            SName = tgt.Ticket.SName,
+            EncryptedPart = encrypted,
+        };
+    }
+
     [Test]
     public async Task RejectsTimestampOutsideSkew()
     {
         TestRealm realm = new();
-        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
 
         ReadOnlyMemory<byte> reply = realm.Send(NewAsReq("user", key, s_start.AddMinutes(-6)));
 
@@ -239,7 +264,7 @@ public class KdcProcessorTests
             Authenticator = tgt.EncryptedPart,
         };
 
-        ReadOnlyMemory<byte> reply = realm.Processor.Process(apReq.EncodeApplication());
+        ReadOnlyMemory<byte> reply = realm.Processor.Process(apReq.EncodeApplication()).ReplyBytes;
 
         await AssertError(reply, KerberosErrorCode.KRB_ERR_GENERIC);
         await Assert.That(KrbError.DecodeApplication(reply).EText).StartsWith("Failed to process request: ");
@@ -250,14 +275,14 @@ public class KdcProcessorTests
     {
         TestRealm realm = new();
         realm.Store.Create(["nopreauth"], TestKdc.ToSecureString(TestKdc.Password),
-            flags: ObolPrincipalFlag.DoesNotRequirePreAuth);
+            flags: Kerberos.PacUserAccountControl.DontRequirePreAuth);
 
         ReadOnlyMemory<byte> reply = realm.Send(NewAsReq("nopreauth", null, s_start));
 
         KrbAsRep asRep = KrbAsRep.DecodeApplication(reply);
         await Assert.That(asRep.CName.Name).IsEquivalentTo(["nopreauth"]);
 
-        KerberosKey key = realm.Store.Find(["nopreauth"])!.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey key = realm.Store.Find(["nopreauth"])!.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         KrbEncAsRepPart part = DecryptAsRep(asRep, key);
         KrbEncTicketPart ticket = TestKdc.DecryptTicket(asRep.Ticket, realm.Store.Krbtgt);
         await Assert.That(part.Nonce).IsEqualTo(1234);
@@ -272,7 +297,7 @@ public class KdcProcessorTests
         ObolPrincipal web = realm.Store.Create(
             ["HTTP", "web"],
             TestKdc.ToSecureString(TestKdc.Password),
-            flags: ObolPrincipalFlag.DoesNotRequirePreAuth,
+            flags: Kerberos.PacUserAccountControl.DontRequirePreAuth,
             aliases: [["web"]]);
 
         ReadOnlyMemory<byte> reply = realm.Send(NewAsReq("web", null, s_start));
@@ -283,7 +308,7 @@ public class KdcProcessorTests
         KrbETypeInfo2Entry entry = KrbETypeInfo2.Decode(paData.Value).ETypeInfo.Single();
         await Assert.That(entry.EType).IsEqualTo(EncryptionType.AES256_CTS_HMAC_SHA1_96);
         await Assert.That(entry.Salt).IsEqualTo("EXAMPLE.TESTHTTPweb");
-        await Assert.That(entry.Salt).IsEqualTo(web.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!.Salt);
+        await Assert.That(entry.Salt).IsEqualTo(web.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!.Salt);
     }
 
     [Test]
@@ -318,7 +343,7 @@ public class KdcProcessorTests
     {
         TestRealm realm = new();
         ObolPrincipal service = realm.Store.Create(["HTTP", "web.example.test", "svc"], password: null,
-            flags: ObolPrincipalFlag.None);
+            flags: Kerberos.PacUserAccountControl.None);
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
 
         ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start, "HTTP/web.example.test/svc"));
@@ -333,7 +358,7 @@ public class KdcProcessorTests
     {
         TestRealm realm = new();
         ObolPrincipal principal = realm.Store.Create(["user@EXAMPLE.TEST"], TestKdc.ToSecureString(TestKdc.Password),
-            flags: ObolPrincipalFlag.DoesNotRequirePreAuth);
+            flags: Kerberos.PacUserAccountControl.DontRequirePreAuth);
 
         // The user principal requires pre-auth so an AS-REP means the escaped name was found.
         ReadOnlyMemory<byte> reply = realm.Send(NewAsReq("user@EXAMPLE.TEST", null, s_start));
@@ -490,8 +515,8 @@ public class KdcProcessorTests
 
         await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_INAPP_CKSUM);
         await Assert.That(KrbError.DecodeApplication(reply).EText).IsEqualTo(
-            "The checksum type HMAC_SHA384_192_AES256 of the request body is not the checksum type of the session " +
-            "key type AES256_CTS_HMAC_SHA1_96");
+            "The checksum type HmacSha384Aes256 of the request body is not the checksum type of the session key type " +
+            "Aes256Sha1");
     }
 
     [Test]
@@ -501,7 +526,7 @@ public class KdcProcessorTests
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
 
         // A TGT this KDC did not issue, made with the krbtgt key, with an RC4 session key.
-        KerberosKey krbtgtKey = realm.Store.Krbtgt.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey krbtgtKey = realm.Store.Krbtgt.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         KrbEncTicketPart forgedPart = KrbEncTicketPart.DecodeApplication(tgt.Ticket.EncryptedPart.Decrypt(
             krbtgtKey,
             KeyUsage.Ticket,
@@ -554,7 +579,7 @@ public class KdcProcessorTests
     public async Task RejectsModifiedBody()
     {
         TestRealm realm = new();
-        realm.Store.Create(["HTTP", "other.example.test"], password: null, flags: ObolPrincipalFlag.None);
+        realm.Store.Create(["HTTP", "other.example.test"], password: null, flags: Kerberos.PacUserAccountControl.None);
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
         KrbTgsReq request = NewTgsReq(tgt, tgtPart, s_start);
 
@@ -617,7 +642,7 @@ public class KdcProcessorTests
     public async Task RejectsModifiedBodyWithRsaMd5Checksum()
     {
         TestRealm realm = new();
-        realm.Store.Create(["HTTP", "other.example.test"], password: null, flags: ObolPrincipalFlag.None);
+        realm.Store.Create(["HTTP", "other.example.test"], password: null, flags: Kerberos.PacUserAccountControl.None);
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
         KrbTgsReq request = NewTgsReq(tgt, tgtPart, s_start, checksum: RsaMd5Checksum);
 
@@ -823,7 +848,7 @@ public class KdcProcessorTests
     public async Task IssuesNotDelegatedClientNonForwardableTgt()
     {
         TestRealm realm = new();
-        realm.Store.Update(realm.User, flags: ObolPrincipalFlag.NotDelegated);
+        realm.Store.Update(realm.User, flags: Kerberos.PacUserAccountControl.NotDelegated);
 
         // MS-SAMR USER_NOT_DELEGATED the forwardable option is ignored rather than rejected.
         (_, KrbEncAsRepPart tgtPart) = realm.GetTgt(b => b.KdcOptions |= KdcOptions.Forwardable);
@@ -837,7 +862,7 @@ public class KdcProcessorTests
         TestRealm realm = new();
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt(b =>
             b.KdcOptions |= KdcOptions.Forwardable | KdcOptions.Renewable);
-        realm.Store.Update(realm.User, flags: ObolPrincipalFlag.NotDelegated);
+        realm.Store.Update(realm.User, flags: Kerberos.PacUserAccountControl.NotDelegated);
 
         ReadOnlyMemory<byte> forwardReply = realm.Send(NewTgsReq(tgt, tgtPart, s_start, service: $"krbtgt/{Realm}",
             configureBody: b => b.KdcOptions |= KdcOptions.Forwarded));
@@ -860,8 +885,8 @@ public class KdcProcessorTests
     public async Task SetsOkAsDelegateForTrustedService()
     {
         TestRealm realm = new();
-        realm.Store.Update(realm.Service, flags: ObolPrincipalFlag.TrustedForDelegation);
-        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        realm.Store.Update(realm.Service, flags: Kerberos.PacUserAccountControl.TrustedForDelegation);
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
 
         KrbTgsRep tgsReply = KrbTgsRep.DecodeApplication(realm.Send(NewTgsReq(tgt, tgtPart, s_start)));
@@ -878,13 +903,15 @@ public class KdcProcessorTests
     }
 
     [Test]
-    [Arguments(ObolPrincipalFlag.None, 0x10u)]
-    [Arguments(ObolPrincipalFlag.DoesNotRequirePreAuth, 0x10010u)]
-    [Arguments(ObolPrincipalFlag.NotDelegated, 0x4010u)]
-    [Arguments(ObolPrincipalFlag.TrustedForDelegation, 0x2010u)]
-    [Arguments(ObolPrincipalFlag.NotDelegated | ObolPrincipalFlag.TrustedForDelegation, 0x6010u)]
-    [Arguments(ObolPrincipalFlag.NoAuthDataRequired, 0x80010u)]
-    public async Task SetsPacUserAccountControl(ObolPrincipalFlag flags, uint expected)
+    [Arguments(Kerberos.PacUserAccountControl.None, 0x10u)]
+    [Arguments(Kerberos.PacUserAccountControl.DontRequirePreAuth, 0x10010u)]
+    [Arguments(Kerberos.PacUserAccountControl.NotDelegated, 0x4010u)]
+    [Arguments(Kerberos.PacUserAccountControl.TrustedForDelegation, 0x2010u)]
+    [Arguments(
+        Kerberos.PacUserAccountControl.NotDelegated | Kerberos.PacUserAccountControl.TrustedForDelegation,
+        0x6010u)]
+    [Arguments(Kerberos.PacUserAccountControl.NoAuthDataRequired, 0x80010u)]
+    public async Task SetsPacUserAccountControl(Kerberos.PacUserAccountControl flags, uint expected)
     {
         TestRealm realm = new();
         realm.Store.Update(realm.User, flags: flags);
@@ -920,7 +947,7 @@ public class KdcProcessorTests
 
         await AssertError(reply, KerberosErrorCode.KDC_ERR_PREAUTH_FAILED);
         await Assert.That(KrbError.DecodeApplication(reply).EText)
-            .IsEqualTo("The principal has no key for the encryption type AES128_CTS_HMAC_SHA256_128");
+            .IsEqualTo("The principal has no key for the encryption type Aes128Sha256");
     }
 
     [Test]
@@ -994,7 +1021,7 @@ public class KdcProcessorTests
     public async Task IssuesServiceTicketFromAsReq()
     {
         TestRealm realm = new();
-        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
 
         // An AS-REQ can ask for any service, like kadmin/changepw, not only the krbtgt.
         ReadOnlyMemory<byte> reply = realm.Send(NewAsReq("user", key, s_start, sname: Name(ServiceName.Split('/'))));
@@ -1046,7 +1073,7 @@ public class KdcProcessorTests
     public async Task IncludesPacWhenRequested(bool? asRequest, bool? tgsRequest, bool expected)
     {
         TestRealm realm = new();
-        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
 
         // Like AD the PAC is included unless PA-PAC-REQUEST says not to, a TGS without one follows the TGT.
         KrbAsReq asReq = NewAsReq("user", key, s_start, paData: asRequest is bool a ? [PacRequest(a)] : null);
@@ -1063,8 +1090,8 @@ public class KdcProcessorTests
     public async Task OmitsPacForNoAuthDataRequiredService()
     {
         TestRealm realm = new();
-        realm.Store.Update(realm.Service, flags: ObolPrincipalFlag.NoAuthDataRequired);
-        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        realm.Store.Update(realm.Service, flags: Kerberos.PacUserAccountControl.NoAuthDataRequired);
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
 
         // MS-KILE 3.3.5.3 the service ticket has no PAC even when the client asks for one, the TGT still has it.
@@ -1082,7 +1109,7 @@ public class KdcProcessorTests
     public async Task KeepsPacInTgtWhenKrbtgtIsNoAuthDataRequired()
     {
         TestRealm realm = new();
-        realm.Store.Update(realm.Store.Krbtgt, flags: ObolPrincipalFlag.NoAuthDataRequired);
+        realm.Store.Update(realm.Store.Krbtgt, flags: Kerberos.PacUserAccountControl.NoAuthDataRequired);
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
 
         // MS-KILE 3.3.5.3 a TGT always has a PAC, so do the service tickets issued from it.
@@ -1100,8 +1127,8 @@ public class KdcProcessorTests
     public async Task EncodesSupportedEncryptionTypesOfService(EncryptionType[] etypes, uint expected)
     {
         TestRealm realm = new();
-        realm.Store.Create(["HTTP", "sha"], null, ObolPrincipalFlag.None,
-            [.. etypes.Select(e => (ObolEncryptionType)e)]);
+        realm.Store.Create(["HTTP", "sha"], null, Kerberos.PacUserAccountControl.None,
+            [.. etypes.Select(e => (Kerberos.EncryptionType)e)]);
         (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
 
         ReadOnlyMemory<byte> reply = realm.Send(NewTgsReq(tgt, tgtPart, s_start, "HTTP/sha",
@@ -1124,7 +1151,7 @@ public class KdcProcessorTests
     /// </summary>
     private static KrbAsRep ReissueTgt(TestRealm realm, KrbAsRep tgt, Action<KrbEncTicketPart> change)
     {
-        KerberosKey krbtgtKey = realm.Store.Krbtgt.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey krbtgtKey = realm.Store.Krbtgt.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         KrbEncTicketPart part = tgt.Ticket.EncryptedPart.Decrypt(
             krbtgtKey,
             KeyUsage.Ticket,
@@ -1149,16 +1176,16 @@ public class KdcProcessorTests
     /// <summary>Copies the ticket with a different realm, name or encrypted part, the cipher is kept as is.</summary>
     private static KrbTicket CopyTicket(KrbTicket ticket, string? realm = null, KrbPrincipalName? sname = null,
         EncryptionType? etype = null, bool keepKvno = true) => new()
-    {
-        Realm = realm ?? ticket.Realm,
-        SName = sname ?? ticket.SName,
-        EncryptedPart = new KrbEncryptedData
         {
-            EType = etype ?? ticket.EncryptedPart.EType,
-            KeyVersionNumber = keepKvno ? ticket.EncryptedPart.KeyVersionNumber : null,
-            Cipher = ticket.EncryptedPart.Cipher,
-        },
-    };
+            Realm = realm ?? ticket.Realm,
+            SName = sname ?? ticket.SName,
+            EncryptedPart = new KrbEncryptedData
+            {
+                EType = etype ?? ticket.EncryptedPart.EType,
+                KeyVersionNumber = keepKvno ? ticket.EncryptedPart.KeyVersionNumber : null,
+                Cipher = ticket.EncryptedPart.Cipher,
+            },
+        };
 
     [Test]
     [Arguments(true)]
@@ -1173,7 +1200,7 @@ public class KdcProcessorTests
             : NewTgsReq(tgt, tgtPart, s_start).EncodeApplication().ToArray();
         request[0] = (byte)((request[0] & 0x3F) | 0x80);
 
-        ReadOnlyMemory<byte> reply = realm.Processor.Process(request);
+        ReadOnlyMemory<byte> reply = realm.Processor.Process(request).ReplyBytes;
 
         await AssertError(reply, KerberosErrorCode.KRB_ERR_GENERIC);
         await Assert.That(KrbError.DecodeApplication(reply).EText).Contains("is not supported");
@@ -1184,9 +1211,9 @@ public class KdcProcessorTests
     {
         // The client has a key for the requested type for the reply, the service does not for the session key.
         TestRealm realm = new();
-        realm.Store.Create(["aes128"], password: null, flags: ObolPrincipalFlag.None,
-            encryptionTypes: [ObolEncryptionType.Aes128Sha1]);
-        KerberosKey key = realm.User.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        realm.Store.Create(["aes128"], password: null, flags: Kerberos.PacUserAccountControl.None,
+            encryptionTypes: [Kerberos.EncryptionType.Aes128Sha1]);
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         KrbAsReq request = NewAsReq("user", key, s_start, sname: Name("aes128"));
         request.Body.EType = [EncryptionType.AES256_CTS_HMAC_SHA1_96];
 
@@ -1239,7 +1266,7 @@ public class KdcProcessorTests
 
         await AssertError(reply, KerberosErrorCode.KRB_AP_ERR_BADKEYVER);
         await Assert.That(KrbError.DecodeApplication(reply).EText)
-            .IsEqualTo("The krbtgt principal has no key for the encryption type RC4_HMAC_NT");
+            .IsEqualTo("The krbtgt principal has no key for the encryption type Rc4Hmac");
     }
 
     [Test]
@@ -1325,5 +1352,834 @@ public class KdcProcessorTests
         await AssertError(reply, KerberosErrorCode.KDC_ERR_BADOPTION);
         await Assert.That(KrbError.DecodeApplication(reply).EText)
             .IsEqualTo("The additional ticket is not a ticket granting ticket");
+    }
+
+    [Test]
+    public async Task RecordsAsExchange()
+    {
+        TestRealm realm = new();
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
+        KrbAsReq request = NewAsReq("user", key, s_start, paData: [PacRequest(true)]);
+        request.Body.KdcOptions = KdcOptions.Forwardable | KdcOptions.RenewableOk;
+        ReadOnlyMemory<byte> encoded = request.EncodeApplication();
+
+        KdcExchange exchange = realm.Processor.Process(encoded);
+
+        await Assert.That(exchange.RequestType).IsEqualTo(Kerberos.MessageType.AsReq);
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.None);
+        await Assert.That(exchange.ErrorText).IsNull();
+        await Assert.That(exchange.Exception).IsNull();
+        await Assert.That(exchange.Error).IsNull();
+        await Assert.That(exchange.ClientName).IsEqualTo($"user@{Realm}");
+        await Assert.That(exchange.ServiceName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(exchange.RequestBytes.ToArray()).IsEquivalentTo(encoded.ToArray());
+        // The reply is the AS-REP, application tag 11.
+        await Assert.That(exchange.ReplyBytes.Span[0]).IsEqualTo((byte)0x6B);
+
+        // The decoded request and the decrypted timestamp are kept for the event.
+        await Assert.That(exchange.Request).IsTypeOf<KrbAsReq>();
+        await Assert.That(exchange.Timestamp!.PaTimestamp).IsEqualTo(s_start);
+        await Assert.That(exchange.Reply).IsTypeOf<KrbAsRep>();
+        await Assert.That(exchange.IssuedTicketPart!.Flags)
+            .IsEqualTo(TicketFlags.Initial | TicketFlags.PreAuthenticated | TicketFlags.Forwardable);
+        await Assert.That(exchange.ReplyPart!.Nonce).IsEqualTo(1234);
+        await Assert.That(exchange.ReplyPart.EndTime).IsEqualTo(s_start.AddHours(1));
+
+        // The client key the reply is encrypted with and the krbtgt key the ticket is encrypted with.
+        await Assert.That(exchange.Keys.Select(k => k.FullName))
+            .IsEquivalentTo([$"user@{Realm}", $"krbtgt/{Realm}@{Realm}"]);
+        await Assert.That(exchange.Keys[0].Key).IsEquivalentTo(key.GetKey().ToArray());
+        await Assert.That(exchange.Keys[0].Kvno).IsEqualTo(realm.User.Kvno);
+        await Assert.That(exchange.Keys[0].EncryptionType).IsEqualTo(Kerberos.EncryptionType.Aes256Sha1);
+        KerberosKey krbtgtKey = realm.Store.Krbtgt.State.Keys[0];
+        await Assert.That(exchange.Keys[1].Key).IsEquivalentTo(krbtgtKey.GetKey().ToArray());
+        await Assert.That((int)exchange.Keys[1].EncryptionType).IsEqualTo((int)krbtgtKey.EncryptionType);
+    }
+
+    [Test]
+    public async Task BuildsAsRequestAndReplyModel()
+    {
+        TestRealm realm = new();
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
+        KrbAsReq request = NewAsReq("user", key, s_start, paData: [PacRequest(true)]);
+        request.Body.KdcOptions = KdcOptions.Forwardable;
+        KdcExchange exchange = realm.Processor.Process(request.EncodeApplication());
+
+        Kerberos.Message requestModel = KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.Message replyModel = KdcMessageBuilder.BuildReply(exchange);
+
+        Kerberos.KdcRequest kdcRequest = (Kerberos.KdcRequest)requestModel;
+        await Assert.That(kdcRequest).IsNotTypeOf<Kerberos.TgsRequest>();
+        await Assert.That(kdcRequest.MessageType).IsEqualTo(Kerberos.MessageType.AsReq);
+        await Assert.That(kdcRequest.ProtocolVersion).IsEqualTo(5);
+        await Assert.That(kdcRequest.Body.KdcOption).IsEqualTo(Kerberos.KdcOption.Forwardable);
+        await Assert.That(kdcRequest.Body.ClientName!.FullName).IsEqualTo($"user@{Realm}");
+        await Assert.That(kdcRequest.Body.ClientName.NameType).IsEqualTo(Kerberos.PrincipalNameType.Principal);
+        await Assert.That(kdcRequest.Body.ServiceName!.FullName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(kdcRequest.Body.Realm).IsEqualTo(Realm);
+        await Assert.That(kdcRequest.Body.Nonce).IsEqualTo(1234);
+        await Assert.That(kdcRequest.Body.EncryptionType)
+            .IsEquivalentTo([Kerberos.EncryptionType.Aes256Sha1, Kerberos.EncryptionType.Aes128Sha1]);
+        await Assert.That(kdcRequest.Body.Till).IsEqualTo(s_start.AddHours(1).LocalDateTime);
+        await Assert.That(kdcRequest.PreAuthData).Count().IsEqualTo(2);
+        Kerberos.TimestampPreAuthData timestamp = (Kerberos.TimestampPreAuthData)kdcRequest.PreAuthData[0];
+        await Assert.That(timestamp.Type).IsEqualTo(Kerberos.PreAuthDataType.EncTimestamp);
+        await Assert.That(timestamp.EncryptedData.EncryptionType).IsEqualTo(Kerberos.EncryptionType.Aes256Sha1);
+        await Assert.That(timestamp.Timestamp).IsEqualTo(s_start.LocalDateTime);
+        Kerberos.PacRequestPreAuthData pacRequest = (Kerberos.PacRequestPreAuthData)kdcRequest.PreAuthData[1];
+        await Assert.That(pacRequest.IncludePac).IsTrue();
+
+        Kerberos.KdcReply reply = (Kerberos.KdcReply)replyModel;
+        await Assert.That(reply.MessageType).IsEqualTo(Kerberos.MessageType.AsRep);
+        await Assert.That(reply.Bytes).IsEquivalentTo(exchange.ReplyBytes.ToArray());
+        await Assert.That(reply.ClientName.FullName).IsEqualTo($"user@{Realm}");
+        // The salt of the client's key is sent back in ETYPE-INFO2.
+        Kerberos.ETypeInfo2PreAuthData etypeInfo = (Kerberos.ETypeInfo2PreAuthData)reply.PreAuthData.Single();
+        await Assert.That(etypeInfo.Entry.Single().EncryptionType).IsEqualTo(Kerberos.EncryptionType.Aes256Sha1);
+        await Assert.That(etypeInfo.Entry.Single().Salt).IsEqualTo($"{Realm}user");
+
+        await Assert.That(reply.Ticket.ServiceName.FullName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(reply.Ticket.EncryptedPart.EncryptionType).IsEqualTo(Kerberos.EncryptionType.Aes256Sha1);
+        await Assert.That(reply.Ticket.EncryptedPart.KeyVersion).IsEqualTo(realm.Store.Krbtgt.Kvno);
+        Kerberos.TicketPart ticket = reply.Ticket.DecryptedPart!;
+        await Assert.That(ticket.Flag).IsEqualTo(
+            Kerberos.TicketFlag.Initial | Kerberos.TicketFlag.PreAuthenticated | Kerberos.TicketFlag.Forwardable);
+        await Assert.That(ticket.ClientName.FullName).IsEqualTo($"user@{Realm}");
+        await Assert.That(ticket.Key.EncryptionType).IsEqualTo(Kerberos.EncryptionType.Aes256Sha1);
+        await Assert.That(ticket.Key.Value).Count().IsEqualTo(32);
+        await Assert.That(ticket.AuthTime).IsEqualTo(s_start.LocalDateTime);
+        await Assert.That(ticket.EndTime).IsEqualTo(s_start.AddHours(1).LocalDateTime);
+        await Assert.That(ticket.RenewTill).IsNull();
+        await Assert.That(ticket.Pac).IsNotNull();
+        await Assert.That(ticket.AuthorizationData.Single()).IsTypeOf<Kerberos.IfRelevantAuthorizationData>();
+
+        Kerberos.KdcReplyPart part = reply.DecryptedPart!;
+        await Assert.That(part.Key.Value).IsEquivalentTo(ticket.Key.Value);
+        await Assert.That(part.Nonce).IsEqualTo(1234);
+        await Assert.That(part.Flag).IsEqualTo(ticket.Flag);
+        await Assert.That(part.ServiceName.FullName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(part.EncryptedPreAuthData.Single().Type)
+            .IsEqualTo(Kerberos.PreAuthDataType.SupportedEncryptionTypes);
+    }
+
+    [Test]
+    public async Task BuildsPacModel()
+    {
+        TestRealm realm = new();
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
+        KdcExchange exchange = realm.Processor.Process(NewAsReq("user", key, s_start).EncodeApplication());
+
+        Kerberos.KdcReply reply = (Kerberos.KdcReply)KdcMessageBuilder.BuildReply(exchange);
+
+        Kerberos.Pac pac = reply.Ticket.DecryptedPart!.Pac!;
+        await Assert.That(pac.Version).IsEqualTo(0);
+        await Assert.That(pac.Buffer.Select(b => b.Type)).Contains(Kerberos.PacBufferType.LogonInfo);
+        await Assert.That(pac.Buffer.Select(b => b.Type)).Contains(Kerberos.PacBufferType.ServerChecksum);
+        await Assert.That(pac.Buffer.Select(b => b.Type)).Contains(Kerberos.PacBufferType.KdcChecksum);
+        await Assert.That(pac.Buffer.All(b => b.Data.Length > 0)).IsTrue();
+
+        Kerberos.PacLogonInfo logon = pac.LogonInfo!;
+        await Assert.That(logon.UserName).IsEqualTo("user");
+        await Assert.That(logon.DomainName).IsEqualTo("EXAMPLE");
+        await Assert.That(logon.DomainSid).IsEqualTo(realm.Store.DomainSid.ToString());
+        await Assert.That(logon.UserId).IsEqualTo(realm.User.Rid);
+        await Assert.That(logon.UserSid).IsEqualTo(realm.User.Sid);
+        await Assert.That(logon.PrimaryGroupId).IsEqualTo(PrincipalStore.DomainUsersRid);
+        await Assert.That(logon.GroupId.Single().RelativeId).IsEqualTo(PrincipalStore.DomainUsersRid);
+        await Assert.That(logon.GroupId.Single().Attribute).IsEqualTo(Kerberos.PacGroupAttribute.Mandatory
+            | Kerberos.PacGroupAttribute.EnabledByDefault | Kerberos.PacGroupAttribute.Enabled);
+        await Assert.That(logon.UserAccountControl).IsEqualTo(Kerberos.PacUserAccountControl.NormalAccount);
+        await Assert.That(logon.LogonTime).IsEqualTo(s_start.LocalDateTime);
+        await Assert.That(logon.LogoffTime).IsNull();
+        await Assert.That(logon.ExtraSid).IsEmpty();
+    }
+
+    [Test]
+    public async Task BuildsTgsRequestModel()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        KrbTgsReq request = NewTgsReq(tgt, tgtPart, s_start);
+        KdcExchange exchange = realm.Processor.Process(request.EncodeApplication());
+
+        await Assert.That(exchange.RequestType).IsEqualTo(Kerberos.MessageType.TgsReq);
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.None);
+        // The client is taken from the TGT, a TGS-REQ body has no cname.
+        await Assert.That(exchange.ClientName).IsEqualTo($"user@{Realm}");
+        await Assert.That(exchange.ServiceName).IsEqualTo($"{ServiceName}@{Realm}");
+        await Assert.That(exchange.Tgt).IsNotNull();
+        await Assert.That(exchange.Authenticator).IsNotNull();
+        // The krbtgt key that decrypts the TGT and the service key the ticket is encrypted with.
+        await Assert.That(exchange.Keys.Select(k => k.FullName))
+            .IsEquivalentTo([$"krbtgt/{Realm}@{Realm}", $"{ServiceName}@{Realm}"]);
+
+        Kerberos.TgsRequest tgsRequest = (Kerberos.TgsRequest)KdcMessageBuilder.BuildRequest(exchange);
+        await Assert.That(tgsRequest.Body.ClientName).IsNull();
+        await Assert.That(tgsRequest.Body.ServiceName!.FullName).IsEqualTo($"{ServiceName}@{Realm}");
+        Kerberos.ApRequest apRequest = tgsRequest.ApRequest!;
+        await Assert.That(tgsRequest.PreAuthData.Single()).IsTypeOf<Kerberos.TgsRequestPreAuthData>();
+        await Assert.That(((Kerberos.TgsRequestPreAuthData)tgsRequest.PreAuthData[0]).ApRequest)
+            .IsSameReferenceAs(apRequest);
+        await Assert.That(apRequest.MessageType).IsEqualTo(Kerberos.MessageType.ApReq);
+        await Assert.That(apRequest.Ticket.ServiceName.FullName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(apRequest.Ticket.DecryptedPart!.ClientName.FullName).IsEqualTo($"user@{Realm}");
+        await Assert.That(apRequest.Ticket.DecryptedPart.Key.Value).IsEquivalentTo(tgtPart.Key.KeyValue.ToArray());
+        await Assert.That(apRequest.Authenticator!.ClientName.FullName).IsEqualTo($"user@{Realm}");
+        await Assert.That(apRequest.Authenticator.Time).IsEqualTo(s_start.LocalDateTime);
+        await Assert.That(apRequest.Authenticator.Checksum!.ChecksumType)
+            .IsEqualTo(Kerberos.ChecksumType.HmacSha1Aes256);
+        await Assert.That(apRequest.Authenticator.Subkey).IsNull();
+
+        Kerberos.KdcReply reply = (Kerberos.KdcReply)KdcMessageBuilder.BuildReply(exchange);
+        await Assert.That(reply.MessageType).IsEqualTo(Kerberos.MessageType.TgsRep);
+        await Assert.That(reply.Ticket.ServiceName.FullName).IsEqualTo($"{ServiceName}@{Realm}");
+        await Assert.That(reply.Ticket.DecryptedPart!.Flag).IsEqualTo(Kerberos.TicketFlag.PreAuthenticated);
+        await Assert.That(reply.Ticket.DecryptedPart.Pac).IsNotNull();
+    }
+
+    [Test]
+    public async Task RecordsRejectedRequest()
+    {
+        TestRealm realm = new();
+
+        KdcExchange exchange = realm.Processor.Process(NewAsReq("user", null, s_start).EncodeApplication());
+
+        await Assert.That(exchange.RequestType).IsEqualTo(Kerberos.MessageType.AsReq);
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.PreAuthRequired);
+        await Assert.That(exchange.ErrorText).IsNull();
+        await Assert.That(exchange.Exception).IsNull();
+        // What the client asked for is recorded even though the request was rejected.
+        await Assert.That(exchange.Request).IsNotNull();
+        await Assert.That(exchange.ClientName).IsEqualTo($"user@{Realm}");
+        await Assert.That(exchange.ServiceName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(exchange.Reply).IsNull();
+        await Assert.That(exchange.Keys).IsEmpty();
+        await AssertError(exchange.ReplyBytes, KerberosErrorCode.KDC_ERR_PREAUTH_REQUIRED);
+
+        Kerberos.ErrorReply error = (Kerberos.ErrorReply)KdcMessageBuilder.BuildReply(exchange);
+        await Assert.That(error.ErrorCode).IsEqualTo(Kerberos.ErrorCode.PreAuthRequired);
+        await Assert.That(error.ErrorText).IsNull();
+        await Assert.That(error.ServiceName.FullName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(error.ErrorData).IsNotNull();
+        // The e-data is METHOD-DATA saying the KDC wants a timestamp and which keys it accepts.
+        await Assert.That(error.MethodData!.Select(p => p.Type))
+            .IsEquivalentTo([Kerberos.PreAuthDataType.EncTimestamp, Kerberos.PreAuthDataType.ETypeInfo2]);
+        Kerberos.ETypeInfo2PreAuthData etypeInfo = (Kerberos.ETypeInfo2PreAuthData)error.MethodData![1];
+        await Assert.That(etypeInfo.Entry.Select(e => e.EncryptionType))
+            .IsEquivalentTo([Kerberos.EncryptionType.Aes256Sha1, Kerberos.EncryptionType.Aes128Sha1]);
+
+        Kerberos.KdcRequest request = (Kerberos.KdcRequest)KdcMessageBuilder.BuildRequest(exchange);
+        await Assert.That(request.Body.EncryptionType)
+            .IsEquivalentTo([Kerberos.EncryptionType.Aes256Sha1, Kerberos.EncryptionType.Aes128Sha1]);
+        await Assert.That(request.PreAuthData).IsEmpty();
+    }
+
+    [Test]
+    public async Task RecordsRejectedRequestWithText()
+    {
+        TestRealm realm = new();
+        KrbAsReq request = NewAsReq("user", null, s_start);
+        request.Body.Realm = "OTHER.TEST";
+
+        KdcExchange exchange = realm.Processor.Process(request.EncodeApplication());
+
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.WrongRealm);
+        await Assert.That(exchange.ErrorText).IsEqualTo("The KDC does not serve the realm 'OTHER.TEST'");
+        await Assert.That(exchange.ClientName).IsEqualTo("user@OTHER.TEST");
+        await Assert.That(exchange.ServiceName).IsEqualTo($"krbtgt/{Realm}@OTHER.TEST");
+
+        Kerberos.ErrorReply error = (Kerberos.ErrorReply)KdcMessageBuilder.BuildReply(exchange);
+        await Assert.That(error.ErrorText).IsEqualTo("The KDC does not serve the realm 'OTHER.TEST'");
+        await Assert.That(error.MethodData).IsNull();
+        await Assert.That(error.ToString())
+            .IsEqualTo("WrongRealm: The KDC does not serve the realm 'OTHER.TEST'");
+    }
+
+    [Test]
+    public async Task RecordsUndecodableRequest()
+    {
+        TestRealm realm = new();
+        // An AS-REQ application tag around a NULL rather than the KDC-REQ sequence.
+        byte[] request = [0x6A, 0x02, 0x05, 0x00];
+
+        KdcExchange exchange = realm.Processor.Process(request);
+
+        await Assert.That(exchange.RequestType).IsEqualTo(Kerberos.MessageType.AsReq);
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.Generic);
+        await Assert.That(exchange.ErrorText).StartsWith("Failed to process request: ");
+        await Assert.That(exchange.Exception).IsNotNull();
+        await Assert.That(exchange.Request).IsNull();
+        await Assert.That(exchange.ClientName).IsNull();
+        await Assert.That(exchange.ServiceName).IsNull();
+        await Assert.That(exchange.RequestBytes.ToArray()).IsEquivalentTo(request);
+        await AssertError(exchange.ReplyBytes, KerberosErrorCode.KRB_ERR_GENERIC);
+
+        // The request is a plain message with the claimed type and its bytes.
+        Kerberos.Message model = KdcMessageBuilder.BuildRequest(exchange);
+        await Assert.That(model).IsNotTypeOf<Kerberos.KdcRequest>();
+        await Assert.That(model.MessageType).IsEqualTo(Kerberos.MessageType.AsReq);
+        await Assert.That(model.Bytes).IsEquivalentTo(request);
+    }
+
+    [Test]
+    public async Task RecordsUnsupportedMessageType()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, _) = realm.GetTgt();
+        KrbApReq apReq = new()
+        {
+            Ticket = tgt.Ticket,
+            Authenticator = tgt.EncryptedPart,
+        };
+
+        KdcExchange exchange = realm.Processor.Process(apReq.EncodeApplication());
+
+        await Assert.That(exchange.RequestType).IsEqualTo(Kerberos.MessageType.Unknown);
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.Generic);
+        // The KDC rejected the message on purpose, there was no unexpected exception.
+        await Assert.That(exchange.Exception).IsNull();
+        await Assert.That(exchange.ErrorText).Contains("is not supported");
+    }
+
+    [Test]
+    public async Task ReplacesReplyOfExchange()
+    {
+        TestRealm realm = new();
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
+        KdcExchange exchange = realm.Processor.Process(NewAsReq("user", key, s_start).EncodeApplication());
+
+        realm.Processor.ReplaceResponseTooBig(exchange, "too big");
+
+        await Assert.That(exchange.RequestType).IsEqualTo(Kerberos.MessageType.AsReq);
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.ResponseTooBig);
+        await Assert.That(exchange.ErrorText).IsEqualTo("too big");
+        // The request details and keys stay, the ticket was not sent so it goes.
+        await Assert.That(exchange.Request).IsNotNull();
+        await Assert.That(exchange.ClientName).IsEqualTo($"user@{Realm}");
+        await Assert.That(exchange.Keys).Count().IsEqualTo(2);
+        await Assert.That(exchange.Reply).IsNull();
+        await Assert.That(exchange.IssuedTicketPart).IsNull();
+        await Assert.That(exchange.ReplyPart).IsNull();
+        await AssertError(exchange.ReplyBytes, KerberosErrorCode.KRB_ERR_RESPONSE_TOO_BIG);
+        await Assert.That(KdcMessageBuilder.BuildReply(exchange)).IsTypeOf<Kerberos.ErrorReply>();
+    }
+
+    [Test]
+    public async Task BuildsAddressesAndAdditionalTickets()
+    {
+        TestRealm realm = new();
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
+        KrbAsReq asReq = NewAsReq("user", key, s_start);
+        asReq.Body.Addresses =
+        [
+            new KrbHostAddress { AddressType = AddressType.IPv4, Address = new byte[] { 192, 0, 2, 1 } },
+            new KrbHostAddress { AddressType = AddressType.IPv6, Address = IPAddress.IPv6Loopback.GetAddressBytes() },
+            new KrbHostAddress { AddressType = AddressType.NetBios, Address = Encoding.ASCII.GetBytes("HOST    ") },
+            // An IPv4 address of the wrong length and a type without a known format are shown as hex.
+            new KrbHostAddress { AddressType = AddressType.IPv4, Address = new byte[] { 1, 2, 3 } },
+            new KrbHostAddress { AddressType = (AddressType)3, Address = new byte[] { 0xAB, 0xCD } },
+        ];
+        string[] expected = ["192.0.2.1", "::1", "HOST", "IPv4 010203", "Directional ABCD"];
+
+        KdcExchange asExchange = realm.Processor.Process(asReq.EncodeApplication());
+
+        await Assert.That(asExchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.None);
+        Kerberos.KdcRequest request = (Kerberos.KdcRequest)KdcMessageBuilder.BuildRequest(asExchange);
+        await Assert.That(request.Body.Address.Select(a => a.ToString())).IsEquivalentTo(expected);
+        await Assert.That(request.Body.Address[0].AddressType).IsEqualTo(Kerberos.AddressType.IPv4);
+        await Assert.That(request.Body.Address[0].Address).IsEquivalentTo(new byte[] { 192, 0, 2, 1 });
+        await Assert.That(request.Body.Address[2].Address).IsEquivalentTo(Encoding.ASCII.GetBytes("HOST    "));
+        await Assert.That(request.Body.AdditionalTicket).IsEmpty();
+        // The ticket is restricted to the addresses of the request, listed in the ticket and the reply part.
+        Kerberos.KdcReply reply = (Kerberos.KdcReply)KdcMessageBuilder.BuildReply(asExchange);
+        await Assert.That(reply.Ticket.DecryptedPart!.Address.Select(a => a.ToString())).IsEquivalentTo(expected);
+        await Assert.That(reply.DecryptedPart!.Address.Select(a => a.ToString())).IsEquivalentTo(expected);
+
+        // A user to user request carries the TGT of the service as an additional ticket.
+        KrbAsRep tgt = KrbAsRep.DecodeApplication(asExchange.ReplyBytes);
+        KrbEncAsRepPart tgtPart = DecryptAsRep(tgt, key);
+        KrbTgsReq tgsReq = NewTgsReq(tgt, tgtPart, s_start, service: "user", configureBody: b =>
+        {
+            b.KdcOptions |= KdcOptions.EncTktInSkey;
+            b.AdditionalTickets = [tgt.Ticket];
+        });
+
+        KdcExchange tgsExchange = realm.Processor.Process(tgsReq.EncodeApplication());
+
+        await Assert.That(tgsExchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.None);
+        Kerberos.TgsRequest tgsRequest = (Kerberos.TgsRequest)KdcMessageBuilder.BuildRequest(tgsExchange);
+        await Assert.That(tgsRequest.Body.KdcOption).IsEqualTo(Kerberos.KdcOption.EncTktInSkey);
+        Kerberos.Ticket additional = tgsRequest.Body.AdditionalTicket.Single();
+        await Assert.That(additional.ServiceName.FullName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(additional.EncryptedPart.Cipher).IsEquivalentTo(tgt.Ticket.EncryptedPart.Cipher.ToArray());
+        // Only the TGT of the AP-REQ is decrypted, the additional ticket is shown as sent.
+        await Assert.That(additional.DecryptedPart).IsNull();
+        await Assert.That(tgsRequest.ApRequest!.Ticket.DecryptedPart!.Address.Select(a => a.ToString()))
+            .IsEquivalentTo(expected);
+    }
+
+    [Test]
+    public async Task BuildsAuthorizationDataThatIsNotAPac()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        // A TGT from a KDC that puts other things in the authorization data: an AD-IF-RELEVANT without a PAC, a type
+        // the model does not decode and an AD-IF-RELEVANT that is not a sequence.
+        KrbTicket forged = ForgeTgt(realm, tgt, part => part.AuthorizationData =
+        [
+            new KrbAuthorizationData
+            {
+                Type = AuthorizationDataType.AdIfRelevant,
+                Data = new KrbAuthorizationDataSequence
+                {
+                    AuthorizationData =
+                    [
+                        new KrbAuthorizationData
+                        {
+                            // AD-KDC-ISSUED, which Kerberos.NET has no name for.
+                            Type = (AuthorizationDataType)4,
+                            Data = new byte[] { 9, 9 },
+                        },
+                    ],
+                }.Encode(),
+            },
+            new KrbAuthorizationData { Type = AuthorizationDataType.AdAndOr, Data = new byte[] { 1 } },
+            new KrbAuthorizationData { Type = AuthorizationDataType.AdIfRelevant, Data = new byte[] { 0xFF } },
+        ]);
+
+        KdcExchange exchange = realm.Processor.Process(
+            NewTgsReq(tgt, tgtPart, s_start, ticket: forged).EncodeApplication());
+
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.None);
+        Kerberos.TgsRequest request = (Kerberos.TgsRequest)KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.TicketPart ticket = request.ApRequest!.Ticket.DecryptedPart!;
+        await Assert.That(ticket.Pac).IsNull();
+        await Assert.That(ticket.AuthorizationData).Count().IsEqualTo(3);
+
+        Kerberos.IfRelevantAuthorizationData ifRelevant =
+            (Kerberos.IfRelevantAuthorizationData)ticket.AuthorizationData[0];
+        await Assert.That(ifRelevant.Type).IsEqualTo(Kerberos.AuthorizationDataType.IfRelevant);
+        Kerberos.AuthorizationData kdcIssued = ifRelevant.Element.Single();
+        await Assert.That(kdcIssued.GetType()).IsEqualTo(typeof(Kerberos.AuthorizationData));
+        await Assert.That(kdcIssued.Type).IsEqualTo(Kerberos.AuthorizationDataType.KdcIssued);
+        await Assert.That(kdcIssued.Data).IsEquivalentTo(new byte[] { 9, 9 });
+        await Assert.That(kdcIssued.ToString()).IsEqualTo("KdcIssued, 2 bytes");
+        await Assert.That(ifRelevant.ToString()).IsEqualTo("IfRelevant [KdcIssued, 2 bytes]");
+
+        Kerberos.AuthorizationData andOr = ticket.AuthorizationData[1];
+        await Assert.That(andOr.GetType()).IsEqualTo(typeof(Kerberos.AuthorizationData));
+        await Assert.That(andOr.Type).IsEqualTo(Kerberos.AuthorizationDataType.AndOr);
+        await Assert.That(andOr.ToString()).IsEqualTo("AndOr, 1 bytes");
+
+        // The AD-IF-RELEVANT that did not decode is listed with its type and bytes.
+        Kerberos.AuthorizationData undecodable = ticket.AuthorizationData[2];
+        await Assert.That(undecodable.GetType()).IsEqualTo(typeof(Kerberos.AuthorizationData));
+        await Assert.That(undecodable.Type).IsEqualTo(Kerberos.AuthorizationDataType.IfRelevant);
+        await Assert.That(undecodable.Data).IsEquivalentTo(new byte[] { 0xFF });
+    }
+
+    [Test]
+    public async Task BuildsPacThatDoesNotDecode()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        // A PACTYPE header with no buffers, one too short to be a header, and one claiming two buffers with only the
+        // first PAC_INFO_BUFFER present and pointing past the end of the data.
+        byte[] empty = new byte[8];
+        byte[] tooShort = [1, 2, 3];
+        byte[] truncated =
+        [
+            2, 0, 0, 0, 0, 0, 0, 0,
+            1, 0, 0, 0, 4, 0, 0, 0, 0x40, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        KrbAuthorizationData[] authorizationData =
+        [
+            new KrbAuthorizationData
+            {
+                Type = AuthorizationDataType.AdIfRelevant,
+                Data = new KrbAuthorizationDataSequence
+                {
+                    AuthorizationData =
+                    [
+                        new KrbAuthorizationData { Type = AuthorizationDataType.AdWin2kPac, Data = empty },
+                        new KrbAuthorizationData { Type = AuthorizationDataType.AdWin2kPac, Data = tooShort },
+                        new KrbAuthorizationData { Type = AuthorizationDataType.AdWin2kPac, Data = truncated },
+                    ],
+                }.Encode(),
+            },
+        ];
+
+        KdcExchange exchange = realm.Processor.Process(NewTgsReq(tgt, tgtPart, s_start,
+            configureAuthenticator: a => a.AuthorizationData = authorizationData).EncodeApplication());
+
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.None);
+        Kerberos.TgsRequest request = (Kerberos.TgsRequest)KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.IfRelevantAuthorizationData ifRelevant =
+            (Kerberos.IfRelevantAuthorizationData)request.ApRequest!.Authenticator!.AuthorizationData.Single();
+        Kerberos.Pac[] pacs = [.. ifRelevant.Element.Select(e => ((Kerberos.PacAuthorizationData)e).Pac)];
+        await Assert.That(pacs).Count().IsEqualTo(3);
+        await Assert.That(pacs.Select(p => p.LogonInfo)).All().Satisfy(l => l.IsNull());
+        await Assert.That(pacs.Select(p => p.ClientInfo)).All().Satisfy(c => c.IsNull());
+        await Assert.That(pacs.Select(p => p.UpnDnsInfo)).All().Satisfy(u => u.IsNull());
+
+        await Assert.That(pacs[0].Buffer).IsEmpty();
+        await Assert.That(pacs[0].ToString()).IsEqualTo("PAC with 0 buffers");
+        await Assert.That(pacs[1].Buffer).IsEmpty();
+        await Assert.That(pacs[1].Version).IsEqualTo(0);
+        // The first buffer is listed without data as it is out of bounds, the second header is missing.
+        Kerberos.PacBuffer buffer = pacs[2].Buffer.Single();
+        await Assert.That(buffer.Type).IsEqualTo(Kerberos.PacBufferType.LogonInfo);
+        await Assert.That(buffer.Data).IsEmpty();
+        await Assert.That(buffer.ToString()).IsEqualTo("LogonInfo, 0 bytes");
+        await Assert.That(pacs[2].ToString()).IsEqualTo("PAC with 1 buffers");
+        await Assert.That(ifRelevant.Element[2].ToString()).IsEqualTo("Win2kPac PAC with 1 buffers");
+    }
+
+    [Test]
+    public async Task BuildsPacWithExtraSidsAndUpn()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        SecurityIdentifier domainSid = realm.Store.DomainSid;
+        SecurityIdentifier administrators = new(IdentifierAuthority.NTAuthority, [32, 544], 0);
+        SecurityIdentifier resourceDomain = new(IdentifierAuthority.NTAuthority, [21, 1, 2, 3], 0);
+        // A PAC like Windows issues with the buffers Obol does not create itself.
+        PrivilegedAttributeCertificate pac = new()
+        {
+            LogonInfo = new PacLogonInfo
+            {
+                DomainName = "EXAMPLE",
+                UserName = "user",
+                UserDisplayName = "A User",
+                DomainSid = domainSid,
+                UserSid = new SecurityIdentifier(domainSid, 1105),
+                GroupSid = new SecurityIdentifier(domainSid, 513),
+                GroupIds = [new GroupMembership { RelativeId = 513, Attributes = SidAttributes.SE_GROUP_ENABLED }],
+                LogonTime = s_start,
+                PwdLastChangeTime = s_start.AddDays(-1),
+                KickOffTime = new RpcFileTime { LowDateTime = 0xFFFFFFFF, HighDateTime = 0x7FFFFFFF },
+                UserFlags = UserFlags.LOGON_EXTRA_SIDS | UserFlags.LOGON_RESOURCE_GROUPS,
+                ExtraIds =
+                [
+                    new RpcSidAttributes
+                    {
+                        Sid = administrators.ToRpcSid(),
+                        Attributes = SidAttributes.SE_GROUP_MANDATORY | SidAttributes.SE_GROUP_ENABLED,
+                    },
+                ],
+                ResourceDomainId = resourceDomain.ToRpcSid(),
+                ResourceGroupIds =
+                [
+                    new GroupMembership
+                    {
+                        RelativeId = 1234,
+                        Attributes = SidAttributes.SE_GROUP_RESOURCE | SidAttributes.SE_GROUP_ENABLED,
+                    },
+                ],
+            },
+            ClientInformation = new PacClientInfo
+            {
+                ClientId = RpcFileTime.ConvertWithoutMicroseconds(s_start),
+                Name = "user",
+            },
+            UpnDomainInformation = new UpnDomainInfo
+            {
+                Upn = "user@example.test",
+                Domain = "EXAMPLE.TEST",
+                Flags = UpnDomainFlags.U,
+            },
+        };
+        KerberosKey kdcKey = realm.Store.Krbtgt.State.Keys[0];
+        KrbAuthorizationData[] authorizationData =
+        [
+            new KrbAuthorizationData
+            {
+                Type = AuthorizationDataType.AdIfRelevant,
+                Data = new KrbAuthorizationDataSequence
+                {
+                    AuthorizationData =
+                    [
+                        new KrbAuthorizationData
+                        {
+                            Type = AuthorizationDataType.AdWin2kPac,
+                            Data = pac.Encode(kdcKey, realm.User.State.Keys[0]),
+                        },
+                    ],
+                }.Encode(),
+            },
+        ];
+
+        KdcExchange exchange = realm.Processor.Process(NewTgsReq(tgt, tgtPart, s_start,
+            configureAuthenticator: a => a.AuthorizationData = authorizationData).EncodeApplication());
+
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.None);
+        Kerberos.TgsRequest request = (Kerberos.TgsRequest)KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.IfRelevantAuthorizationData ifRelevant =
+            (Kerberos.IfRelevantAuthorizationData)request.ApRequest!.Authenticator!.AuthorizationData.Single();
+        Kerberos.Pac actual = ((Kerberos.PacAuthorizationData)ifRelevant.Element.Single()).Pac;
+        await Assert.That(actual.Buffer.Select(b => b.Type)).IsEquivalentTo(
+        [
+            Kerberos.PacBufferType.LogonInfo,
+            Kerberos.PacBufferType.ClientInfo,
+            Kerberos.PacBufferType.UpnDnsInfo,
+            Kerberos.PacBufferType.ServerChecksum,
+            Kerberos.PacBufferType.KdcChecksum,
+        ]);
+
+        Kerberos.PacLogonInfo logon = actual.LogonInfo!;
+        await Assert.That(logon.UserDisplayName).IsEqualTo("A User");
+        await Assert.That(logon.UserSid).IsEqualTo($"{domainSid}-1105");
+        await Assert.That(logon.PrimaryGroupSid).IsEqualTo($"{domainSid}-513");
+        await Assert.That(logon.LogonTime).IsEqualTo(s_start.LocalDateTime);
+        await Assert.That(logon.PasswordLastSet).IsEqualTo(s_start.AddDays(-1).LocalDateTime);
+        await Assert.That(logon.KickOffTime).IsNull();
+        await Assert.That(logon.PasswordMustChange).IsNull();
+        await Assert.That(logon.UserFlag)
+            .IsEqualTo(Kerberos.PacUserFlag.ExtraSids | Kerberos.PacUserFlag.ResourceGroups);
+        Kerberos.PacSidAttributes extra = logon.ExtraSid.Single();
+        await Assert.That(extra.Sid).IsEqualTo("S-1-5-32-544");
+        await Assert.That(extra.Attribute)
+            .IsEqualTo(Kerberos.PacGroupAttribute.Mandatory | Kerberos.PacGroupAttribute.Enabled);
+        await Assert.That(extra.ToString()).IsEqualTo("S-1-5-32-544 (Mandatory, Enabled)");
+        await Assert.That(logon.ResourceDomainSid).IsEqualTo("S-1-5-21-1-2-3");
+        Kerberos.PacGroupMembership resourceGroup = logon.ResourceGroupId.Single();
+        await Assert.That(resourceGroup.RelativeId).IsEqualTo(1234u);
+        await Assert.That(resourceGroup.Attribute)
+            .IsEqualTo(Kerberos.PacGroupAttribute.Resource | Kerberos.PacGroupAttribute.Enabled);
+        await Assert.That(resourceGroup.ToString()).IsEqualTo("1234 (Enabled, Resource)");
+
+        Kerberos.PacClientInfo client = actual.ClientInfo!;
+        await Assert.That(client.Name).IsEqualTo("user");
+        await Assert.That(client.ClientId).IsEqualTo(s_start.LocalDateTime);
+        await Assert.That(client.ToString()).IsEqualTo($"user at {s_start.LocalDateTime}");
+
+        Kerberos.PacUpnDnsInfo upn = actual.UpnDnsInfo!;
+        await Assert.That(upn.Upn).IsEqualTo("user@example.test");
+        await Assert.That(upn.DnsDomainName).IsEqualTo("EXAMPLE.TEST");
+        await Assert.That(upn.Flag).IsEqualTo(Kerberos.PacUpnDnsFlag.NoUpn);
+        await Assert.That(upn.ToString()).IsEqualTo("user@example.test");
+    }
+
+    [Test]
+    public async Task BuildsErrorWithClientAndErrorDataThatIsNotMethodData()
+    {
+        // A KRB-ERROR as another KDC might send it, with the client and time of the request and e-data that is not
+        // METHOD-DATA, such as the KERB-ERROR-DATA of Windows.
+        KrbError error = new()
+        {
+            ErrorCode = KerberosErrorCode.KDC_ERR_POLICY,
+            Realm = Realm,
+            SName = Name("krbtgt", Realm),
+            CName = Name("user"),
+            CRealm = Realm,
+            CTime = s_start,
+            Cusec = 500,
+            STime = s_start.AddSeconds(1),
+            Susc = 250,
+            EText = "Not allowed",
+            EData = new byte[] { 1, 2, 3 },
+        };
+        KdcExchange exchange = new();
+        exchange.SetError(error, error.EncodeApplication());
+
+        Kerberos.ErrorReply reply = (Kerberos.ErrorReply)KdcMessageBuilder.BuildReply(exchange);
+
+        await Assert.That(reply.MessageType).IsEqualTo(Kerberos.MessageType.Error);
+        await Assert.That(reply.ErrorCode).IsEqualTo(Kerberos.ErrorCode.Policy);
+        await Assert.That(reply.ClientName!.FullName).IsEqualTo($"user@{Realm}");
+        await Assert.That(reply.ClientTime).IsEqualTo(s_start.AddTicks(500 * 10).LocalDateTime);
+        await Assert.That(reply.ServerTime).IsEqualTo(s_start.AddSeconds(1).AddTicks(250 * 10).LocalDateTime);
+        await Assert.That(reply.ServiceName.FullName).IsEqualTo($"krbtgt/{Realm}@{Realm}");
+        await Assert.That(reply.ErrorData).IsEquivalentTo(new byte[] { 1, 2, 3 });
+        await Assert.That(reply.MethodData).IsNull();
+        await Assert.That(reply.ToString()).IsEqualTo("Policy: Not allowed");
+        // Nothing was received for the exchange so the request is an empty unknown message.
+        Kerberos.Message request = KdcMessageBuilder.BuildRequest(exchange);
+        await Assert.That(request.GetType()).IsEqualTo(typeof(Kerberos.Message));
+        await Assert.That(request.MessageType).IsEqualTo(Kerberos.MessageType.Unknown);
+        await Assert.That(request.Bytes).IsEmpty();
+        await Assert.That(request.ToString()).IsEqualTo("Unknown, 0 bytes");
+    }
+
+    [Test]
+    public async Task BuildsMethodDataWithUnknownTypeAndEntryWithoutSalt()
+    {
+        KrbError error = new()
+        {
+            ErrorCode = KerberosErrorCode.KDC_ERR_PREAUTH_REQUIRED,
+            Realm = Realm,
+            SName = Name("krbtgt", Realm),
+            EData = new KrbMethodData
+            {
+                MethodData =
+                [
+                    new KrbPaData
+                    {
+                        Type = PaDataType.PA_ETYPE_INFO2,
+                        Value = new KrbETypeInfo2
+                        {
+                            ETypeInfo =
+                            [
+                                new KrbETypeInfo2Entry { EType = EncryptionType.AES128_CTS_HMAC_SHA1_96 },
+                                new KrbETypeInfo2Entry
+                                {
+                                    EType = EncryptionType.AES256_CTS_HMAC_SHA1_96,
+                                    Salt = "salt",
+                                    S2kParams = new byte[] { 0, 0, 0x10, 0 },
+                                },
+                            ],
+                        }.Encode(),
+                    },
+                    new KrbPaData { Type = PaDataType.PA_FX_FAST, Value = new byte[] { 0x30, 0 } },
+                    // A PA-ENC-TIMESTAMP that does not decode is listed with its bytes.
+                    new KrbPaData { Type = PaDataType.PA_ENC_TIMESTAMP, Value = new byte[] { 0xFF } },
+                ],
+            }.Encode(),
+            STime = s_start,
+        };
+        KdcExchange exchange = new();
+        exchange.SetError(error, error.EncodeApplication());
+
+        Kerberos.ErrorReply reply = (Kerberos.ErrorReply)KdcMessageBuilder.BuildReply(exchange);
+
+        await Assert.That(reply.MethodData!).Count().IsEqualTo(3);
+        Kerberos.ETypeInfo2PreAuthData etypeInfo = (Kerberos.ETypeInfo2PreAuthData)reply.MethodData![0];
+        await Assert.That(etypeInfo.Entry[0].Salt).IsNull();
+        await Assert.That(etypeInfo.Entry[0].StringToKeyParameters).IsNull();
+        await Assert.That(etypeInfo.Entry[0].ToString()).IsEqualTo("etype Aes128Sha1");
+        await Assert.That(etypeInfo.Entry[1].Salt).IsEqualTo("salt");
+        await Assert.That(etypeInfo.Entry[1].StringToKeyParameters).IsEquivalentTo(new byte[] { 0, 0, 0x10, 0 });
+        await Assert.That(etypeInfo.Entry[1].ToString()).IsEqualTo("etype Aes256Sha1 salt salt");
+        await Assert.That(etypeInfo.ToString()).IsEqualTo("ETypeInfo2 etype Aes128Sha1, etype Aes256Sha1 salt salt");
+
+        Kerberos.PreAuthData fast = reply.MethodData[1];
+        await Assert.That(fast.GetType()).IsEqualTo(typeof(Kerberos.PreAuthData));
+        await Assert.That(fast.Type).IsEqualTo(Kerberos.PreAuthDataType.FxFast);
+        await Assert.That(fast.Value).IsEquivalentTo(new byte[] { 0x30, 0 });
+        await Assert.That(fast.ToString()).IsEqualTo("FxFast, 2 bytes");
+
+        Kerberos.PreAuthData timestamp = reply.MethodData[2];
+        await Assert.That(timestamp.GetType()).IsEqualTo(typeof(Kerberos.PreAuthData));
+        await Assert.That(timestamp.Type).IsEqualTo(Kerberos.PreAuthDataType.EncTimestamp);
+        await Assert.That(timestamp.Value).IsEquivalentTo(new byte[] { 0xFF });
+    }
+
+    [Test]
+    public async Task BuildsUnknownMessagesForExchangeWithoutReply()
+    {
+        KdcExchange exchange = new() { RequestBytes = new byte[] { 1, 2 } };
+
+        Kerberos.Message request = KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.Message reply = KdcMessageBuilder.BuildReply(exchange);
+
+        await Assert.That(request.GetType()).IsEqualTo(typeof(Kerberos.Message));
+        await Assert.That(request.MessageType).IsEqualTo(Kerberos.MessageType.Unknown);
+        await Assert.That(request.Bytes).IsEquivalentTo(new byte[] { 1, 2 });
+        await Assert.That(request.ToString()).IsEqualTo("Unknown, 2 bytes");
+        await Assert.That(reply.GetType()).IsEqualTo(typeof(Kerberos.Message));
+        await Assert.That(reply.MessageType).IsEqualTo(Kerberos.MessageType.Unknown);
+        await Assert.That(reply.Bytes).IsEmpty();
+    }
+
+    [Test]
+    public async Task FormatsAsExchangeModel()
+    {
+        TestRealm realm = new();
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
+        KrbAsReq asReq = NewAsReq("user", key, s_start, paData: [PacRequest(true)]);
+        KdcExchange exchange = realm.Processor.Process(asReq.EncodeApplication());
+        string krbtgt = $"krbtgt/{Realm}@{Realm}";
+        DateTime start = s_start.LocalDateTime;
+        DateTime end = s_start.AddHours(1).LocalDateTime;
+
+        Kerberos.KdcRequest request = (Kerberos.KdcRequest)KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.KdcReply reply = (Kerberos.KdcReply)KdcMessageBuilder.BuildReply(exchange);
+
+        await Assert.That(request.ToString()).IsEqualTo($"AsReq user@{Realm} -> {krbtgt}");
+        await Assert.That(request.Body.ToString()).IsEqualTo($"user@{Realm} -> {krbtgt}");
+        await Assert.That(request.Body.ClientName!.ToString()).IsEqualTo($"user@{Realm}");
+        Kerberos.TimestampPreAuthData timestamp = (Kerberos.TimestampPreAuthData)request.PreAuthData[0];
+        await Assert.That(timestamp.EncryptedData.KeyVersion).IsEqualTo(realm.User.Kvno);
+        await Assert.That(timestamp.EncryptedData.ToString())
+            .IsEqualTo($"etype Aes256Sha1 kvno {realm.User.Kvno}, {timestamp.EncryptedData.Cipher.Length} bytes");
+        await Assert.That(timestamp.ToString()).IsEqualTo($"EncTimestamp {start} ({timestamp.EncryptedData})");
+        await Assert.That(request.PreAuthData[1].ToString()).IsEqualTo("PacRequest True");
+
+        await Assert.That(reply.ToString()).IsEqualTo($"AsRep user@{Realm} -> {krbtgt}");
+        await Assert.That(reply.PreAuthData.Single().ToString())
+            .IsEqualTo($"ETypeInfo2 etype Aes256Sha1 salt {Realm}user");
+        await Assert.That(reply.Ticket.EncryptedPart.ToString()).IsEqualTo(
+            $"etype Aes256Sha1 kvno {realm.Store.Krbtgt.Kvno}, {reply.Ticket.EncryptedPart.Cipher.Length} bytes");
+        await Assert.That(reply.Ticket.ToString()).IsEqualTo($"{krbtgt} ({reply.Ticket.EncryptedPart})");
+        await Assert.That(reply.EncryptedPart.ToString())
+            .IsEqualTo($"etype Aes256Sha1 kvno {realm.User.Kvno}, {reply.EncryptedPart.Cipher.Length} bytes");
+
+        Kerberos.TicketPart ticket = reply.Ticket.DecryptedPart!;
+        await Assert.That(ticket.ToString()).IsEqualTo($"user@{Realm} PreAuthenticated, Initial, expires {end}");
+        await Assert.That(ticket.Key.ToString()).IsEqualTo("etype Aes256Sha1, 32 bytes");
+        Kerberos.IfRelevantAuthorizationData ifRelevant =
+            (Kerberos.IfRelevantAuthorizationData)ticket.AuthorizationData.Single();
+        Kerberos.PacAuthorizationData pacData = (Kerberos.PacAuthorizationData)ifRelevant.Element.Single();
+        Kerberos.Pac pac = pacData.Pac;
+        await Assert.That(pac.ToString()).IsEqualTo($"PAC for EXAMPLE\\user, {pac.Buffer.Length} buffers");
+        await Assert.That(pacData.ToString()).IsEqualTo($"Win2kPac {pac}");
+        await Assert.That(ifRelevant.ToString()).IsEqualTo($"IfRelevant [Win2kPac {pac}]");
+        Kerberos.PacBuffer logonBuffer = pac.Buffer.First(b => b.Type == Kerberos.PacBufferType.LogonInfo);
+        await Assert.That(logonBuffer.ToString()).IsEqualTo($"LogonInfo, {logonBuffer.Data.Length} bytes");
+        await Assert.That(pac.LogonInfo!.ToString()).IsEqualTo($"EXAMPLE\\user ({realm.User.Sid})");
+        await Assert.That(pac.LogonInfo.GroupId.Single().ToString())
+            .IsEqualTo("513 (Mandatory, EnabledByDefault, Enabled)");
+        await Assert.That(pac.ClientInfo!.ToString()).IsEqualTo($"user at {start}");
+
+        Kerberos.KdcReplyPart part = reply.DecryptedPart!;
+        await Assert.That(part.ToString()).IsEqualTo($"{krbtgt} PreAuthenticated, Initial, expires {end}");
+        await Assert.That(part.LastRequest.Single().ToString()).IsEqualTo($"0: {start}");
+        Kerberos.PreAuthData supported = part.EncryptedPreAuthData.Single();
+        await Assert.That(supported.ToString()).IsEqualTo($"SupportedEncryptionTypes, {supported.Value.Length} bytes");
+    }
+
+    [Test]
+    public async Task FormatsTgsExchangeModel()
+    {
+        TestRealm realm = new();
+        (KrbAsRep tgt, KrbEncAsRepPart tgtPart) = realm.GetTgt();
+        KdcExchange exchange = realm.Processor.Process(NewTgsReq(tgt, tgtPart, s_start).EncodeApplication());
+        string service = $"{ServiceName}@{Realm}";
+        DateTime start = s_start.LocalDateTime;
+
+        Kerberos.TgsRequest request = (Kerberos.TgsRequest)KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.KdcReply reply = (Kerberos.KdcReply)KdcMessageBuilder.BuildReply(exchange);
+
+        await Assert.That(request.ToString()).IsEqualTo($"TgsReq -> {service}");
+        await Assert.That(request.Body.ToString()).IsEqualTo($"-> {service}");
+        Kerberos.ApRequest apRequest = request.ApRequest!;
+        await Assert.That(apRequest.Ticket.ToString())
+            .IsEqualTo($"krbtgt/{Realm}@{Realm} ({apRequest.Ticket.EncryptedPart})");
+        await Assert.That(apRequest.ToString()).IsEqualTo($"AP-REQ {apRequest.Ticket}");
+        await Assert.That(request.PreAuthData.Single().ToString()).IsEqualTo($"TgsReq {apRequest.Ticket}");
+        await Assert.That(apRequest.EncryptedAuthenticator.ToString())
+            .IsEqualTo($"etype Aes256Sha1, {apRequest.EncryptedAuthenticator.Cipher.Length} bytes");
+        await Assert.That(apRequest.Authenticator!.ToString()).IsEqualTo($"user@{Realm} at {start}");
+        await Assert.That(apRequest.Authenticator.Checksum!.ToString()).IsEqualTo("cksumtype HmacSha1Aes256, 12 bytes");
+
+        await Assert.That(reply.ToString()).IsEqualTo($"TgsRep user@{Realm} -> {service}");
+        await Assert.That(reply.Ticket.ToString()).IsEqualTo($"{service} ({reply.Ticket.EncryptedPart})");
+        await Assert.That(reply.Ticket.DecryptedPart!.ToString())
+            .IsEqualTo($"user@{Realm} PreAuthenticated, expires {s_start.AddHours(1).LocalDateTime}");
+    }
+
+    [Test]
+    public async Task FormatsTimestampTheKdcDidNotDecrypt()
+    {
+        TestRealm realm = new();
+        KerberosKey key = realm.User.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
+
+        KdcExchange exchange = realm.Processor.Process(NewAsReq("unknown", key, s_start).EncodeApplication());
+
+        await Assert.That(exchange.ErrorCode).IsEqualTo(Kerberos.ErrorCode.ClientPrincipalUnknown);
+        Kerberos.KdcRequest request = (Kerberos.KdcRequest)KdcMessageBuilder.BuildRequest(exchange);
+        Kerberos.TimestampPreAuthData timestamp = (Kerberos.TimestampPreAuthData)request.PreAuthData.Single();
+        await Assert.That(timestamp.Timestamp).IsNull();
+        await Assert.That(timestamp.ToString()).IsEqualTo($"EncTimestamp ({timestamp.EncryptedData})");
     }
 }

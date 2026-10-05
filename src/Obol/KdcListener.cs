@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -50,6 +51,7 @@ internal sealed class KdcListener : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly HashSet<Task> _requests = [];
     private Action<Exception>? _onFault;
+    private Action<KdcExchange>? _onExchange;
     private Task _tcpAcceptTask = Task.CompletedTask;
     private Task _udpReceiveTask = Task.CompletedTask;
     private int _disposed;
@@ -97,9 +99,14 @@ internal sealed class KdcListener : IDisposable
 
     /// <summary>Starts accepting requests.</summary>
     /// <param name="onFault">Called if a receive loop fails unexpectedly and the listener should be stopped.</param>
-    public void Start(Action<Exception> onFault)
+    /// <param name="onExchange">
+    /// Called with each request and its reply before the reply is sent, on the thread that processed the request.
+    /// An exception it throws is ignored.
+    /// </param>
+    public void Start(Action<Exception> onFault, Action<KdcExchange>? onExchange = null)
     {
         _onFault = onFault;
+        _onExchange = onExchange;
         if (_tcpSocket is not null)
         {
             _tcpAcceptTask = Task.Run(() => RunLoopAsync(TcpAcceptLoopAsync));
@@ -252,6 +259,7 @@ internal sealed class KdcListener : IDisposable
 
         try
         {
+            IPEndPoint? remote = GetRemoteEndpoint(client);
             using NetworkStream stream = new(client, ownsSocket: true);
             byte[] lengthBuffer = new byte[4];
             while (true)
@@ -272,16 +280,21 @@ internal sealed class KdcListener : IDisposable
                     string reason = length < 0
                         ? "Length prefix extensions are not supported"
                         : $"Request length {length} exceeds the limit of {MaxRequestLength} bytes";
-                    await WriteTcpResponseAsync(stream, _processor.CreateRequestTooLongError(reason),
-                        cancelToken).ConfigureAwait(false);
+                    KdcExchange error = _processor.CreateRequestTooLongExchange(reason);
+                    error.Time = DateTime.Now;
+                    error.Transport = ObolKdcTransport.Tcp;
+                    error.ClientAddress = remote;
+                    Report(error);
+                    await WriteTcpResponseAsync(stream, error.ReplyBytes, cancelToken).ConfigureAwait(false);
                     return;
                 }
 
                 byte[] request = new byte[length];
                 await stream.ReadExactlyAsync(request, cancelToken).ConfigureAwait(false);
 
-                ReadOnlyMemory<byte> response = _processor.Process(request);
-                await WriteTcpResponseAsync(stream, response, cancelToken).ConfigureAwait(false);
+                KdcExchange exchange = ProcessRequest(request, ObolKdcTransport.Tcp, remote);
+                Report(exchange);
+                await WriteTcpResponseAsync(stream, exchange.ReplyBytes, cancelToken).ConfigureAwait(false);
             }
         }
         catch (Exception e) when (e is OperationCanceledException or IOException or SocketException
@@ -342,20 +355,60 @@ internal sealed class KdcListener : IDisposable
     {
         try
         {
-            ReadOnlyMemory<byte> response = _processor.Process(request);
-            if (response.Length > MaxUdpReplySize)
+            KdcExchange exchange = ProcessRequest(request, ObolKdcTransport.Udp, remoteEndpoint as IPEndPoint);
+            if (exchange.ReplyBytes.Length > MaxUdpReplySize)
             {
                 // This is sent even if it is over the limit itself, the client needs a reply to retry over TCP.
-                response = _processor.CreateResponseTooBigError(
-                    $"Response of {response.Length} bytes is too big for UDP, retry over TCP");
+                _processor.ReplaceResponseTooBig(exchange,
+                    $"Response of {exchange.ReplyBytes.Length} bytes is too big for UDP, retry over TCP");
             }
+            Report(exchange);
 
-            await _udpSocket!.SendToAsync(response, SocketFlags.None, remoteEndpoint, cancelToken)
+            await _udpSocket!.SendToAsync(exchange.ReplyBytes, SocketFlags.None, remoteEndpoint, cancelToken)
                 .ConfigureAwait(false);
         }
         catch (Exception e) when (e is OperationCanceledException or SocketException or ObjectDisposedException)
         {
             // The listener is stopping or the reply could not be sent, UDP clients retry on their own.
+        }
+    }
+
+    /// <summary>Processes a request and records when it arrived, how long it took and where it came from.</summary>
+    private KdcExchange ProcessRequest(byte[] request, ObolKdcTransport transport, IPEndPoint? remote)
+    {
+        DateTime time = DateTime.Now;
+        long start = Stopwatch.GetTimestamp();
+        KdcExchange exchange = _processor.Process(request);
+        exchange.Duration = Stopwatch.GetElapsedTime(start);
+        exchange.Time = time;
+        exchange.Transport = transport;
+        exchange.ClientAddress = remote;
+        return exchange;
+    }
+
+    /// <summary>Reports an exchange to the callback, a failure in it must not stop the reply.</summary>
+    private void Report(KdcExchange exchange)
+    {
+        try
+        {
+            _onExchange?.Invoke(exchange);
+        }
+        catch (Exception)
+        {
+            // The callback is not the KDC's concern, the client still gets its reply.
+        }
+    }
+
+    private static IPEndPoint? GetRemoteEndpoint(Socket client)
+    {
+        try
+        {
+            return client.RemoteEndPoint as IPEndPoint;
+        }
+        catch (Exception e) when (e is SocketException or ObjectDisposedException)
+        {
+            // The client already went away.
+            return null;
         }
     }
 

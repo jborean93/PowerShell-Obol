@@ -92,11 +92,9 @@ Describe "New-ObolKeytabEntry" {
             Should-Throw -FullyQualifiedErrorId "$ErrorId,Obol.Commands.NewObolKeytabEntry"
     }
 
-    It "Fails for an undefined encryption type" {
-        $etype = [Enum]::ToObject([Obol.ObolEncryptionType], 23)
-
-        { New-ObolKeytabEntry user@A.TEST -Key ([byte[]]::new(16)) -EncryptionType $etype } |
-            Should-Throw -FullyQualifiedErrorId 'InvalidEncryptionType,Obol.Commands.NewObolKeytabEntry'
+    It "Fails for an encryption type a principal cannot have keys for" {
+        { New-ObolKeytabEntry user@A.TEST -Key ([byte[]]::new(16)) -EncryptionType Rc4Hmac } |
+            Should-Throw -FullyQualifiedErrorId 'ParameterArgumentValidationError,Obol.Commands.NewObolKeytabEntry'
     }
 
     It "Creates the entries of a principal" {

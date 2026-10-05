@@ -94,6 +94,7 @@
         'Set-ObolPrincipal'
         'Start-ObolKdc'
         'Stop-ObolKdc'
+        'Trace-ObolKdc'
         'Use-ObolKrb5Environment'
         'Use-ObolSspiEnvironment'
     )

@@ -1,5 +1,6 @@
 using System;
 using Kerberos.NET.Entities;
+using Obol.Kerberos;
 
 namespace Obol.Protocol;
 
@@ -7,7 +8,7 @@ namespace Obol.Protocol;
 internal sealed class KdcException : Exception
 {
     public KdcException(
-        KerberosErrorCode code,
+        ErrorCode code,
         string? text = null,
         KrbPrincipalName? sname = null,
         ReadOnlyMemory<byte>? errorData = null)
@@ -19,7 +20,7 @@ internal sealed class KdcException : Exception
         ErrorData = errorData;
     }
 
-    public KerberosErrorCode Code { get; }
+    public ErrorCode Code { get; }
 
     /// <summary>The e-text of the error, if any.</summary>
     public string? Text { get; }

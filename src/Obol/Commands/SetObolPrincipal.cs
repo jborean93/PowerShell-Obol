@@ -2,7 +2,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Management.Automation;
 using System.Security;
+using Obol.Kerberos;
 using Obol.Protocol;
+using PrincipalName = Obol.Protocol.PrincipalName;
 
 namespace Obol.Commands;
 
@@ -51,10 +53,11 @@ public sealed class SetObolPrincipal : PSCmdlet
 
     [Parameter]
     [ValidateNotNull]
-    public ObolEncryptionType[]? EncryptionType { get; set; }
+    [ValidateSet(typeof(SupportedEncryptionTypeValues))]
+    public EncryptionType[]? EncryptionType { get; set; }
 
     [Parameter]
-    public ObolPrincipalFlag Flag { get; set; }
+    public PacUserAccountControl Flag { get; set; }
 
     [Parameter]
     [AllowEmptyCollection]
@@ -87,7 +90,7 @@ public sealed class SetObolPrincipal : PSCmdlet
 
     protected override void ProcessRecord()
     {
-        ObolEncryptionType[]? etypes = PrincipalCommandHelper.CheckEncryptionTypes(
+        EncryptionType[]? etypes = PrincipalCommandHelper.CheckEncryptionTypes(
             EncryptionType,
             out ErrorRecord? error);
         if (error is not null)
@@ -97,7 +100,7 @@ public sealed class SetObolPrincipal : PSCmdlet
         }
 
         // The flags replace the existing flags, like the aliases, only when set.
-        ObolPrincipalFlag? flags = null;
+        PacUserAccountControl? flags = null;
         if (MyInvocation.BoundParameters.ContainsKey(nameof(Flag)))
         {
             error = PrincipalCommandHelper.CheckFlags(Flag);

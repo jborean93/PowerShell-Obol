@@ -33,7 +33,7 @@ public class KeytabTests
         PrincipalState state = new(
             [new KerberosKey(key: key, etype: EncryptionType.AES128_CTS_HMAC_SHA1_96, kvno: 1)],
             1,
-            ObolPrincipalFlag.None,
+            Kerberos.PacUserAccountControl.None,
             []);
         ObolPrincipal principal = new(store, ["host", "a"], state, 1000, "S-1-5-21-1-2-3-1000");
 
@@ -62,8 +62,8 @@ public class KeytabTests
         ObolPrincipal principal = store.Create(
             ["HTTP", "web.example.test"],
             null,
-            ObolPrincipalFlag.None,
-            [ObolEncryptionType.Aes256Sha384, ObolEncryptionType.Aes128Sha1],
+            Kerberos.PacUserAccountControl.None,
+            [Kerberos.EncryptionType.Aes256Sha384, Kerberos.EncryptionType.Aes128Sha1],
             [["HTTP", "web"], ["HTTP", "a/b@c"]]);
         DateTimeOffset timestamp = DateTimeOffset.FromUnixTimeSeconds(1790000000);
 
@@ -88,7 +88,7 @@ public class KeytabTests
             await Assert.That(entry.Timestamp).IsEqualTo(timestamp);
             await Assert.That(entry.Version).IsEqualTo(1);
 
-            KerberosKey expected = principal.State.GetKey(entry.EncryptionType!.Value)!;
+            KerberosKey expected = principal.State.GetKey(entry.EncryptionType!.Value.ToObol())!;
             await Assert.That(entry.Key.GetKey().ToArray()).IsEquivalentTo(expected.GetKey().ToArray());
         }
         await Assert.That(entries.Select(e => e.EncryptionType!.Value).Distinct()).IsEquivalentTo(
@@ -99,7 +99,7 @@ public class KeytabTests
     public async Task WritesKvnoOver255()
     {
         PrincipalStore store = new("EXAMPLE.TEST", false);
-        ObolPrincipal principal = store.Create(["user"], null, ObolPrincipalFlag.None);
+        ObolPrincipal principal = store.Create(["user"], null, Kerberos.PacUserAccountControl.None);
         for (int i = 0; i < 300; i++)
         {
             store.Update(principal, newRandomKey: true);
@@ -119,7 +119,8 @@ public class KeytabTests
     public async Task ReadsWhatItWrites()
     {
         PrincipalStore store = new("EXAMPLE.TEST", false);
-        ObolPrincipal principal = store.Create(["HTTP", "a/b"], null, ObolPrincipalFlag.None, null, [["HTTP", "c"]]);
+        ObolPrincipal principal = store.Create(["HTTP", "a/b"], null, Kerberos.PacUserAccountControl.None, null,
+            [["HTTP", "c"]]);
         store.Update(principal, newRandomKey: true);
         DateTimeOffset timestamp = DateTimeOffset.FromUnixTimeSeconds(1790000000);
 
@@ -129,16 +130,16 @@ public class KeytabTests
             [@"HTTP/a\/b@EXAMPLE.TEST", @"HTTP/a\/b@EXAMPLE.TEST", "HTTP/c@EXAMPLE.TEST", "HTTP/c@EXAMPLE.TEST"]);
         await Assert.That(entries[0].Components).IsEquivalentTo(["HTTP", "a/b"]);
         await Assert.That(entries.Select(e => e.EncryptionType)).IsEquivalentTo(
-            [ObolEncryptionType.Aes256Sha1, ObolEncryptionType.Aes128Sha1,
-                ObolEncryptionType.Aes256Sha1, ObolEncryptionType.Aes128Sha1]);
+            [Kerberos.EncryptionType.Aes256Sha1, Kerberos.EncryptionType.Aes128Sha1,
+                Kerberos.EncryptionType.Aes256Sha1, Kerberos.EncryptionType.Aes128Sha1]);
         foreach (ObolKeytabEntry entry in entries)
         {
             await Assert.That(entry.Kvno).IsEqualTo(2);
-            await Assert.That(entry.NameType).IsEqualTo(ObolPrincipalNameType.Principal);
+            await Assert.That(entry.NameType).IsEqualTo(Kerberos.PrincipalNameType.Principal);
             await Assert.That(entry.Timestamp.ToUniversalTime()).IsEqualTo(timestamp.UtcDateTime);
             await Assert.That(entry.Timestamp.Kind).IsEqualTo(DateTimeKind.Local);
             await Assert.That(entry.Key).IsEquivalentTo(
-                principal.State.GetKey((EncryptionType)entry.EncryptionType)!.GetKey().ToArray());
+                principal.State.GetKey(entry.EncryptionType)!.GetKey().ToArray());
         }
     }
 
@@ -257,7 +258,8 @@ public class KeytabTests
     {
         // The entry shows local time, the keytab must hold the same instant in UTC seconds.
         PrincipalStore store = new("R", false);
-        ObolPrincipal principal = store.Create(["a"], null, ObolPrincipalFlag.None, [ObolEncryptionType.Aes128Sha1]);
+        ObolPrincipal principal = store.Create(["a"], null, Kerberos.PacUserAccountControl.None,
+            [Kerberos.EncryptionType.Aes128Sha1]);
         DateTime utc = DateTime.UnixEpoch.AddSeconds(0x01020304);
         ObolKeytabEntry entry = Keytab.GetEntries(principal, utc).Single();
 
@@ -298,7 +300,7 @@ public class KeytabTests
     public async Task RejectsComponentTooLongToWrite()
     {
         ObolKeytabEntry entry = new("R", ["HTTP", new string('a', ushort.MaxValue + 1)],
-            ObolPrincipalNameType.Principal, DateTime.UtcNow, 1, ObolEncryptionType.Aes128Sha1, new byte[16]);
+            Kerberos.PrincipalNameType.Principal, DateTime.UtcNow, 1, Kerberos.EncryptionType.Aes128Sha1, new byte[16]);
 
         ArgumentException ex = (await Assert.That(() => Keytab.WriteEntry(new ArrayBufferWriter<byte>(), entry))
             .Throws<ArgumentException>())!;

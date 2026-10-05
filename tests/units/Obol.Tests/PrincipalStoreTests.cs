@@ -10,7 +10,7 @@ public class PrincipalStoreTests
     private static PrincipalStore CreateStore(bool caseInsensitive = false) => new("EXAMPLE.TEST", caseInsensitive);
 
     private static ObolPrincipal AddService(PrincipalStore store, string name, params string[] aliases)
-        => store.Create(name.Split('/'), null, ObolPrincipalFlag.None, null,
+        => store.Create(name.Split('/'), null, Kerberos.PacUserAccountControl.None, null,
             [.. System.Linq.Enumerable.Select(aliases, a => a.Split('/'))]);
 
     private static async Task AssertStoreError(System.Action action, PrincipalStoreError error)
@@ -27,7 +27,7 @@ public class PrincipalStoreTests
         store.Remove(first);
 
         ObolPrincipal second = AddService(store, "HTTP/second");
-        ObolPrincipal third = store.Create(["HTTP", "third"], null, ObolPrincipalFlag.None, rid: 1000);
+        ObolPrincipal third = store.Create(["HTTP", "third"], null, Kerberos.PacUserAccountControl.None, rid: 1000);
 
         await Assert.That(second.Sid).IsEqualTo($"{store.DomainSid}-1001");
         await Assert.That(third.Sid).IsEqualTo($"{store.DomainSid}-1000");
@@ -39,7 +39,8 @@ public class PrincipalStoreTests
         PrincipalStore store = CreateStore();
         AddService(store, "HTTP/first");
 
-        await AssertStoreError(() => store.Create(["HTTP", "second"], null, ObolPrincipalFlag.None, rid: 1000),
+        await AssertStoreError(
+            () => store.Create(["HTTP", "second"], null, Kerberos.PacUserAccountControl.None, rid: 1000),
             PrincipalStoreError.RidAlreadyUsed);
     }
 
@@ -86,12 +87,13 @@ public class PrincipalStoreTests
         // The keys MIT ktutil addent -password creates for user@EXAMPLE.TEST with the default salt and iteration
         // count. The last password is a G clef outside the BMP, a surrogate pair in the SecureString.
         PrincipalStore store = CreateStore();
-        ObolPrincipal user = store.Create(["user"], TestKdc.ToSecureString(password), ObolPrincipalFlag.None,
+        ObolPrincipal user = store.Create(["user"], TestKdc.ToSecureString(password),
+            Kerberos.PacUserAccountControl.None,
         [
-            ObolEncryptionType.Aes256Sha1,
-            ObolEncryptionType.Aes128Sha1,
-            ObolEncryptionType.Aes256Sha384,
-            ObolEncryptionType.Aes128Sha256,
+            Kerberos.EncryptionType.Aes256Sha1,
+            Kerberos.EncryptionType.Aes128Sha1,
+            Kerberos.EncryptionType.Aes256Sha384,
+            Kerberos.EncryptionType.Aes128Sha256,
         ]);
 
         await Assert.That(KeyHex(user, EncryptionType.AES256_CTS_HMAC_SHA1_96)).IsEqualTo(aes256Sha1);
@@ -101,7 +103,7 @@ public class PrincipalStoreTests
     }
 
     private static string KeyHex(ObolPrincipal principal, EncryptionType etype)
-        => System.Convert.ToHexStringLower(principal.State.GetKey(etype)!.GetKey().Span);
+        => System.Convert.ToHexStringLower(principal.State.GetKey(etype.ToObol())!.GetKey().Span);
 
     [Test]
     public async Task RejectsUnknownEncryptionType()
@@ -109,7 +111,8 @@ public class PrincipalStoreTests
         PrincipalStore store = CreateStore();
 
         // The cmdlets reject undefined values, the store still fails if one gets through.
-        await Assert.That(() => store.Create(["HTTP", "web"], null, ObolPrincipalFlag.None, [(ObolEncryptionType)99]))
+        await Assert.That(() => store.Create(["HTTP", "web"], null, Kerberos.PacUserAccountControl.None,
+            [(Kerberos.EncryptionType)99]))
             .Throws<System.ArgumentOutOfRangeException>();
     }
 
@@ -121,7 +124,7 @@ public class PrincipalStoreTests
         service.State = new PrincipalState(
             [new KerberosKey(key: new byte[16], etype: EncryptionType.RC4_HMAC_NT, kvno: 1)],
             1,
-            ObolPrincipalFlag.None,
+            Kerberos.PacUserAccountControl.None,
             []);
 
         await Assert.That(() => new KdcPrincipal(service).EncodeSupportedEncryptionTypes())
@@ -203,11 +206,11 @@ public class PrincipalStoreTests
     {
         PrincipalStore store = CreateStore();
         ObolPrincipal service = AddService(store, "HTTP/web");
-        byte[] oldKey = service.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!.GetKey().ToArray();
+        byte[] oldKey = service.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!.GetKey().ToArray();
 
         store.Update(service, newRandomKey: true);
 
-        KerberosKey newKey = service.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey newKey = service.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         await Assert.That(service.Kvno).IsEqualTo(2);
         await Assert.That(newKey.Version).IsEqualTo(2);
         await Assert.That(newKey.GetKey().ToArray()).IsNotEquivalentTo(oldKey);
@@ -219,9 +222,9 @@ public class PrincipalStoreTests
         PrincipalStore store = CreateStore();
         ObolPrincipal service = AddService(store, "HTTP/web");
 
-        store.Update(service, encryptionTypes: [ObolEncryptionType.Aes128Sha1]);
+        store.Update(service, encryptionTypes: [Kerberos.EncryptionType.Aes128Sha1]);
 
-        await Assert.That(service.EncryptionType).IsEquivalentTo([ObolEncryptionType.Aes128Sha1]);
+        await Assert.That(service.EncryptionType).IsEquivalentTo([Kerberos.EncryptionType.Aes128Sha1]);
         await Assert.That(service.Kvno).IsEqualTo(1);
     }
 
@@ -232,11 +235,11 @@ public class PrincipalStoreTests
         ObolPrincipal service = AddService(store, "HTTP/web");
 
         await AssertStoreError(
-            () => store.Update(service, encryptionTypes: [ObolEncryptionType.Aes256Sha384]),
+            () => store.Update(service, encryptionTypes: [Kerberos.EncryptionType.Aes256Sha384]),
             PrincipalStoreError.InvalidEncryptionType);
 
-        store.Update(service, newRandomKey: true, encryptionTypes: [ObolEncryptionType.Aes256Sha384]);
-        await Assert.That(service.EncryptionType).IsEquivalentTo([ObolEncryptionType.Aes256Sha384]);
+        store.Update(service, newRandomKey: true, encryptionTypes: [Kerberos.EncryptionType.Aes256Sha384]);
+        await Assert.That(service.EncryptionType).IsEquivalentTo([Kerberos.EncryptionType.Aes256Sha384]);
     }
 
     [Test]
@@ -288,14 +291,15 @@ public class PrincipalStoreTests
         byte[] aes128 = [.. Enumerable.Range(0, 16).Select(i => (byte)i)];
         byte[] aes256 = [.. Enumerable.Range(0, 32).Select(i => (byte)(i + 100))];
 
-        ObolPrincipal principal = store.Create(["HTTP", "web"], null, ObolPrincipalFlag.None, salt: "CUSTOMsalt",
+        ObolPrincipal principal = store.Create(["HTTP", "web"], null, Kerberos.PacUserAccountControl.None,
+            salt: "CUSTOMsalt",
             importedKeys: new ImportedKeys(7,
-                [(ObolEncryptionType.Aes128Sha1, aes128), (ObolEncryptionType.Aes256Sha1, aes256)]));
+                [(Kerberos.EncryptionType.Aes128Sha1, aes128), (Kerberos.EncryptionType.Aes256Sha1, aes256)]));
 
         await Assert.That(principal.Kvno).IsEqualTo(7);
         await Assert.That(principal.Salt).IsEqualTo("CUSTOMsalt");
         await Assert.That(principal.EncryptionType).IsEquivalentTo(
-            [ObolEncryptionType.Aes128Sha1, ObolEncryptionType.Aes256Sha1]);
+            [Kerberos.EncryptionType.Aes128Sha1, Kerberos.EncryptionType.Aes256Sha1]);
         await Assert.That(KeyHex(principal, EncryptionType.AES128_CTS_HMAC_SHA1_96))
             .IsEqualTo(System.Convert.ToHexStringLower(aes128));
         await Assert.That(principal.State.Keys.Select(k => k.Version)).IsEquivalentTo(new int?[] { 7, 7 });
@@ -306,8 +310,8 @@ public class PrincipalStoreTests
     {
         PrincipalStore store = CreateStore();
 
-        ObolPrincipal principal = store.Create(["HTTP", "web"], null, ObolPrincipalFlag.None,
-            importedKeys: new ImportedKeys(1, [(ObolEncryptionType.Aes128Sha1, new byte[16])]));
+        ObolPrincipal principal = store.Create(["HTTP", "web"], null, Kerberos.PacUserAccountControl.None,
+            importedKeys: new ImportedKeys(1, [(Kerberos.EncryptionType.Aes128Sha1, new byte[16])]));
 
         await Assert.That(principal.Salt).IsEqualTo("EXAMPLE.TESTHTTPweb");
     }
@@ -321,10 +325,11 @@ public class PrincipalStoreTests
         store.Update(principal, newRandomKey: true);
 
         // A keytab can have an older kvno than the principal, the keys keep the keytab kvno.
-        store.Update(principal, importedKeys: new ImportedKeys(1, [(ObolEncryptionType.Aes256Sha1, new byte[32])]));
+        store.Update(principal,
+            importedKeys: new ImportedKeys(1, [(Kerberos.EncryptionType.Aes256Sha1, new byte[32])]));
 
         await Assert.That(principal.Kvno).IsEqualTo(1);
-        await Assert.That(principal.EncryptionType).IsEquivalentTo([ObolEncryptionType.Aes256Sha1]);
+        await Assert.That(principal.EncryptionType).IsEquivalentTo([Kerberos.EncryptionType.Aes256Sha1]);
         await Assert.That(principal.State.Keys[0].Version).IsEqualTo(1);
     }
 
@@ -335,7 +340,7 @@ public class PrincipalStoreTests
         PrincipalStore store = CreateStore();
 
         ObolPrincipal principal = store.Create(["HTTP", "web"], TestKdc.ToSecureString("Password123!"),
-            ObolPrincipalFlag.None, [ObolEncryptionType.Aes256Sha1], salt: "CORP.EXAMPLEsvc_web");
+            Kerberos.PacUserAccountControl.None, [Kerberos.EncryptionType.Aes256Sha1], salt: "CORP.EXAMPLEsvc_web");
 
         await Assert.That(principal.Salt).IsEqualTo("CORP.EXAMPLEsvc_web");
         await Assert.That(KeyHex(principal, EncryptionType.AES256_CTS_HMAC_SHA1_96))
@@ -349,7 +354,7 @@ public class PrincipalStoreTests
         ObolPrincipal principal = AddService(store, "HTTP/web");
 
         store.Update(principal, TestKdc.ToSecureString("Password123!"),
-            encryptionTypes: [ObolEncryptionType.Aes256Sha1], salt: "CORP.EXAMPLEsvc_web");
+            encryptionTypes: [Kerberos.EncryptionType.Aes256Sha1], salt: "CORP.EXAMPLEsvc_web");
 
         await Assert.That(principal.Kvno).IsEqualTo(2);
         await Assert.That(KeyHex(principal, EncryptionType.AES256_CTS_HMAC_SHA1_96))
@@ -362,7 +367,7 @@ public class PrincipalStoreTests
         PrincipalStore store = CreateStore();
 
         ObolPrincipal principal = store.Create(["HTTP", "web"], TestKdc.ToSecureString("Password123!"),
-            ObolPrincipalFlag.None, kvno: 300);
+            Kerberos.PacUserAccountControl.None, kvno: 300);
 
         await Assert.That(principal.Kvno).IsEqualTo(300);
         await Assert.That(principal.State.Keys.Select(k => k.Version)).IsEquivalentTo(new int?[] { 300, 300 });

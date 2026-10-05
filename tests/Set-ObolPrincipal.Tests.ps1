@@ -41,7 +41,7 @@ Describe "Set-ObolPrincipal" {
     It "Keeps a subset of the encryption types without new keys" {
         Set-ObolPrincipal $service -EncryptionType Aes128Sha1
 
-        $service.EncryptionType | Should-Be ([Obol.ObolEncryptionType]::Aes128Sha1)
+        $service.EncryptionType | Should-Be ([Obol.Kerberos.EncryptionType]::Aes128Sha1)
         $service.Kvno | Should-Be 1
     }
 
@@ -53,13 +53,13 @@ Describe "Set-ObolPrincipal" {
         $service.EncryptionType.Count | Should-Be 2
     }
 
-    It "Fails with an undefined encryption type" {
-        $etype = [Enum]::ToObject([Obol.ObolEncryptionType], 99)
+    It "Fails with an encryption type a principal cannot have keys for: <Case>" -TestCases @(
+        @{ Case = 'a registered type'; EncryptionType = [Obol.Kerberos.EncryptionType]::Rc4Hmac }
+        @{ Case = 'an undefined value'; EncryptionType = [Enum]::ToObject([Obol.Kerberos.EncryptionType], 99) }
+    ) {
+        { Set-ObolPrincipal $service -NewRandomKey -EncryptionType $EncryptionType } |
+            Should-Throw -FullyQualifiedErrorId 'ParameterArgumentValidationError,Obol.Commands.SetObolPrincipal'
 
-        Set-ObolPrincipal $service -NewRandomKey -EncryptionType $etype -ErrorAction SilentlyContinue -ErrorVariable err
-
-        $err.Count | Should-Be 1
-        $err[0].FullyQualifiedErrorId | Should-Be 'InvalidEncryptionType,Obol.Commands.SetObolPrincipal'
         $service.Kvno | Should-Be 1
     }
 
@@ -75,42 +75,40 @@ Describe "Set-ObolPrincipal" {
         Set-ObolPrincipal $service -NewRandomKey -EncryptionType Aes256Sha384, Aes256Sha1
 
         $service.EncryptionType | Should-BeCollection @(
-            [Obol.ObolEncryptionType]::Aes256Sha384
-            [Obol.ObolEncryptionType]::Aes256Sha1
+            [Obol.Kerberos.EncryptionType]::Aes256Sha384
+            [Obol.Kerberos.EncryptionType]::Aes256Sha1
         )
     }
 
     It "Sets the flags to <Value>" -TestCases @(
-        @{ Value = 'DoesNotRequirePreAuth' }
+        @{ Value = 'DontRequirePreAuth' }
         @{ Value = 'None' }
     ) {
         param ($Value)
 
-        $other = if ($Value -eq 'None') { 'DoesNotRequirePreAuth' } else { 'None' }
+        $other = if ($Value -eq 'None') { 'DontRequirePreAuth' } else { 'None' }
         Set-ObolPrincipal $user -Flag $other
         Set-ObolPrincipal $user -Flag $Value
 
         # The flags replace the existing flags.
-        $user.Flag | Should-Be ([Obol.ObolPrincipalFlag]$Value)
+        $user.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]$Value)
         $user.Kvno | Should-Be 1
     }
 
     It "Leaves values not set unchanged" {
-        Set-ObolPrincipal $user -Flag DoesNotRequirePreAuth
+        Set-ObolPrincipal $user -Flag DontRequirePreAuth
         Set-ObolPrincipal $user -Alias user2
 
-        $user.Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
+        $user.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
         $user.Alias | Should-Be user2
     }
 
-    It "Fails with an undefined flag" {
-        $flag = [Enum]::ToObject([Obol.ObolPrincipalFlag], 0x8000)
-
-        Set-ObolPrincipal $user -Flag $flag -ErrorAction SilentlyContinue -ErrorVariable err
+    It "Fails with an unsupported flag" {
+        Set-ObolPrincipal $user -Flag SmartcardRequired -ErrorAction SilentlyContinue -ErrorVariable err
 
         $err.Count | Should-Be 1
         $err[0].FullyQualifiedErrorId | Should-Be 'InvalidFlag,Obol.Commands.SetObolPrincipal'
-        $user.Flag | Should-Be ([Obol.ObolPrincipalFlag]::None)
+        $user.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::None)
     }
 
     It "Replaces the aliases" {
@@ -179,9 +177,9 @@ Describe "Set-ObolPrincipal" {
     }
 
     It "Sets principals by name with -Kdc" {
-        Set-ObolPrincipal -Kdc $kdc user@EXAMPLE.TEST -Flag DoesNotRequirePreAuth
+        Set-ObolPrincipal -Kdc $kdc user@EXAMPLE.TEST -Flag DontRequirePreAuth
 
-        $user.Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
+        $user.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
     }
 
     It "Fails for a name that does not exist" {

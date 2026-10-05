@@ -1,10 +1,10 @@
-namespace Obol;
+namespace Obol.Kerberos;
 
 /// <summary>
 /// The name type of a principal name, the values are the IANA assigned numbers. A type without a name here, such
 /// as one read from a keytab, is kept as its number.
 /// </summary>
-public enum ObolPrincipalNameType
+public enum PrincipalNameType
 {
     /// <summary>NT-UNKNOWN, the type is not known.</summary>
     Unknown = 0,

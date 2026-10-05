@@ -1,5 +1,6 @@
 using System;
-using Obol.Protocol;
+using Obol.Kerberos;
+using PrincipalName = Obol.Protocol.PrincipalName;
 
 namespace Obol;
 
@@ -9,10 +10,10 @@ public sealed class ObolKeytabEntry
     internal ObolKeytabEntry(
         string realm,
         string[] components,
-        ObolPrincipalNameType nameType,
+        PrincipalNameType nameType,
         DateTime timestamp,
         int kvno,
-        ObolEncryptionType encryptionType,
+        EncryptionType encryptionType,
         byte[] key)
     {
         Realm = realm;
@@ -40,10 +41,10 @@ public sealed class ObolKeytabEntry
     public string FullName => $"{Name}@{Realm}";
 
     /// <summary>
-    /// The name type of the principal, usually <see cref="ObolPrincipalNameType.Principal"/>. A type without a name
+    /// The name type of the principal, usually <see cref="PrincipalNameType.Principal"/>. A type without a name
     /// is shown as its number.
     /// </summary>
-    public ObolPrincipalNameType NameType { get; }
+    public PrincipalNameType NameType { get; }
 
     /// <summary>The local time the entry was written, the keytab stores it in UTC.</summary>
     public DateTime Timestamp { get; }
@@ -52,9 +53,10 @@ public sealed class ObolKeytabEntry
     public int Kvno { get; }
 
     /// <summary>
-    /// The encryption type of the key, a type Obol does not support, such as RC4 (23), is shown as its number.
+    /// The encryption type of the key. A keytab can hold types a principal cannot have keys for, such as
+    /// <see cref="EncryptionType.Rc4Hmac"/>, those entries are read and written but not used for keys.
     /// </summary>
-    public ObolEncryptionType EncryptionType { get; }
+    public EncryptionType EncryptionType { get; }
 
     /// <summary>The key value.</summary>
     public byte[] Key { get; }

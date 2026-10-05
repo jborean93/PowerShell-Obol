@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Management.Automation;
+using Obol.Kerberos;
 using Obol.Protocol;
 
 namespace Obol.Commands;
@@ -38,7 +39,7 @@ internal static class KeytabKeySelector
             : StringComparer.Ordinal);
 
         List<ObolKeytabEntry> usable = [];
-        HashSet<(ObolEncryptionType, int)> warned = [];
+        HashSet<(EncryptionType, int)> warned = [];
         foreach (ObolKeytabEntry entry in entries)
         {
             // A null in an array cast from a hashtable is not checked by the parameter validation.
@@ -49,13 +50,13 @@ internal static class KeytabKeySelector
             }
 
             // Aliases repeat the same keys, only warn once for each key.
-            if (!Enum.IsDefined(entry.EncryptionType))
+            if (!PrincipalStore.SupportedEncryptionTypes.Contains(entry.EncryptionType))
             {
                 if (warned.Add((entry.EncryptionType, entry.Kvno)))
                 {
                     cmdlet.WriteWarning(
                         $"Ignoring the keytab entry for {entry.FullName} with kvno {entry.Kvno}, encryption type " +
-                        $"{(int)entry.EncryptionType} is not supported");
+                        $"{entry.EncryptionType} is not supported");
                 }
                 continue;
             }
@@ -101,7 +102,7 @@ internal static class KeytabKeySelector
             return null;
         }
 
-        List<(ObolEncryptionType Type, byte[] Value)> keys = [];
+        List<(EncryptionType Type, byte[] Value)> keys = [];
         foreach (ObolKeytabEntry entry in selected)
         {
             int existing = keys.FindIndex(k => k.Type == entry.EncryptionType);
@@ -125,7 +126,7 @@ internal static class KeytabKeySelector
         // Without a kvno a type missing from the newest keys is most likely an old key that was not updated.
         if (kvno is null)
         {
-            foreach (IGrouping<ObolEncryptionType, ObolKeytabEntry> older in usable
+            foreach (IGrouping<EncryptionType, ObolKeytabEntry> older in usable
                 .Where(e => e.Kvno < selectedKvno && !keys.Any(k => k.Type == e.EncryptionType))
                 .GroupBy(e => e.EncryptionType))
             {

@@ -300,7 +300,7 @@ Describe "Use-ObolKrb5Environment" {
         It "Does not set its own variables in the caller's scope" {
             Use-ObolKrb5Environment EXAMPLE.TEST { } -NoNewScope
 
-            Get-Variable Strip, Kdc -Scope 0 -ErrorAction Ignore | Should-BeNull
+            Get-Variable ScriptBlock, Arguments, Kdc -Scope 0 -ErrorAction Ignore | Should-BeNull
         }
 
         It "Throws a terminating error from the scriptblock and cleans up" {

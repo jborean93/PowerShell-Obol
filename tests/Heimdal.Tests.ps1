@@ -75,6 +75,57 @@ Describe "Heimdal" -Skip:(-not $heimdal) {
         }
     }
 
+    Context "Tracing" {
+        It "Traces the AS and TGS exchanges of kinit and kgetcred" {
+            $kdc = Start-ObolKdc EXAMPLE.TEST -Principal @{ user = $password; 'HTTP/web.example.test' = $null }
+            $kdc | Export-ObolKrb5Config $krb5Conf -Provider Heimdal
+
+            $actual = Trace-ObolKdc -Kdc $kdc {
+                $null = Invoke-KerberosTool { 'Password123!' | kinit --password-file=STDIN user@EXAMPLE.TEST }
+                $null = Invoke-KerberosTool { kgetcred HTTP/web.example.test@EXAMPLE.TEST }
+            }
+
+            # kinit asks without pre-authentication first, then with the timestamp, kgetcred uses the TGT.
+            $actual.Count | Should-Be 3
+            [string[]]$actual.Request.MessageType | Should-BeCollection AsReq, AsReq, TgsReq
+            [string[]]$actual.Reply.MessageType | Should-BeCollection Error, AsRep, TgsRep
+            [string[]]$actual.ErrorCode | Should-BeCollection PreAuthRequired, None, None
+            $actual.ClientName | Should-BeCollection 'user@EXAMPLE.TEST', 'user@EXAMPLE.TEST', 'user@EXAMPLE.TEST'
+            $actual.ServiceName | Should-BeCollection 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'HTTP/web.example.test@EXAMPLE.TEST'
+
+            [int[]]$actual[0].Request.PreAuthData.Type | Should-NotContainCollection 2
+            $actual[0].Key.Count | Should-Be 0
+            # The error carries the salt and encryption types the client needs for the timestamp.
+            $actual[0].Reply.ErrorCode | Should-Be ([Obol.Kerberos.ErrorCode]::PreAuthRequired)
+            [int[]]$actual[0].Reply.MethodData.Type | Should-ContainCollection 2, 19
+
+            [int[]]$actual[1].Request.PreAuthData.Type | Should-ContainCollection 2
+            ($actual[1].Request.PreAuthData | Where-Object Type -eq EncTimestamp).Timestamp | Should-HaveType ([DateTime])
+            $tgt = $actual[1].Reply.Ticket.DecryptedPart
+            $tgt.Flag.HasFlag([Obol.Kerberos.TicketFlag]::Initial) | Should-BeTrue
+            $tgt.Flag.HasFlag([Obol.Kerberos.TicketFlag]::PreAuthenticated) | Should-BeTrue
+            $tgt.Pac.LogonInfo.UserName | Should-Be user
+            $tgt.Pac.LogonInfo.DomainName | Should-Be EXAMPLE
+            [Convert]::ToHexString($actual[1].Reply.DecryptedPart.Key.Value) | Should-Be ([Convert]::ToHexString($tgt.Key.Value))
+            $actual[1].Key.FullName | Should-BeCollection 'user@EXAMPLE.TEST', 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
+
+            # PA-TGS-REQ carries the TGT.
+            [int[]]$actual[2].Request.PreAuthData.Type | Should-ContainCollection 1
+            $actual[2].Request | Should-HaveType ([Obol.Kerberos.TgsRequest])
+            # The KDC decrypted the TGT and the authenticator the client presented.
+            $actual[2].Request.ApRequest.Ticket.DecryptedPart.ClientName.FullName | Should-Be 'user@EXAMPLE.TEST'
+            [Convert]::ToHexString($actual[2].Request.ApRequest.Ticket.DecryptedPart.Key.Value) | Should-Be ([Convert]::ToHexString($tgt.Key.Value))
+            $actual[2].Request.ApRequest.Authenticator.ClientName.FullName | Should-Be 'user@EXAMPLE.TEST'
+            $service = $actual[2].Reply.Ticket.DecryptedPart
+            $service.Key.EncryptionType | Should-Be 18
+            $actual[2].Reply.Ticket.EncryptedPart.EncryptionType | Should-Be 18
+            $service.Flag.HasFlag([Obol.Kerberos.TicketFlag]::PreAuthenticated) | Should-BeTrue
+            $service.Flag.HasFlag([Obol.Kerberos.TicketFlag]::Initial) | Should-BeFalse
+            $service.Pac | Should-NotBeNull
+            $actual[2].Key.FullName | Should-BeCollection 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'HTTP/web.example.test@EXAMPLE.TEST'
+        }
+    }
+
     Context "Keytabs" {
         It "Gets a ticket with a password" {
             $kdc = Start-ObolKdc EXAMPLE.TEST -Principal @{ user = $password }

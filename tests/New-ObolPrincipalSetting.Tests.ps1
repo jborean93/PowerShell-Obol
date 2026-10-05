@@ -9,7 +9,7 @@ Describe "New-ObolPrincipalSetting" {
 
         $actual | Should-HaveType ([Obol.ObolPrincipalSetting])
         $actual.Password | Should-BeNull
-        $actual.Flag | Should-Be ([Obol.ObolPrincipalFlag]::None)
+        $actual.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::None)
         $actual.EncryptionType | Should-BeNull
         $actual.Alias | Should-BeNull
         $actual.Rid | Should-BeNull
@@ -80,13 +80,13 @@ Describe "New-ObolPrincipalSetting" {
     It "Creates a setting with every value" {
         $password = ConvertTo-SecureString -String 'Password123!' -AsPlainText -Force
 
-        $actual = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth -EncryptionType Aes256Sha384, Aes128Sha256 -Alias a, b -Rid 500
+        $actual = New-ObolPrincipalSetting -Password $password -Flag DontRequirePreAuth -EncryptionType Aes256Sha384, Aes128Sha256 -Alias a, b -Rid 500
 
         $actual.Password | Should-BeSame $password
-        $actual.Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
+        $actual.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
         $actual.EncryptionType | Should-BeCollection @(
-            [Obol.ObolEncryptionType]::Aes256Sha384
-            [Obol.ObolEncryptionType]::Aes128Sha256
+            [Obol.Kerberos.EncryptionType]::Aes256Sha384
+            [Obol.Kerberos.EncryptionType]::Aes128Sha256
         )
         $actual.Alias | Should-BeCollection @('a', 'b')
         $actual.Rid | Should-Be 500
@@ -104,14 +104,14 @@ Describe "New-ObolPrincipalSetting" {
 
     It "Casts a hashtable to a setting" {
         $actual = [Obol.ObolPrincipalSetting]@{
-            flag = 'DoesNotRequirePreAuth'
+            flag = 'DontRequirePreAuth'
             EncryptionType = 'Aes128Sha1'
             Alias = 'a'
             Rid = '600'
         }
 
-        $actual.Flag | Should-Be ([Obol.ObolPrincipalFlag]::DoesNotRequirePreAuth)
-        $actual.EncryptionType | Should-BeCollection @([Obol.ObolEncryptionType]::Aes128Sha1)
+        $actual.Flag | Should-Be ([Obol.Kerberos.PacUserAccountControl]::DontRequirePreAuth)
+        $actual.EncryptionType | Should-BeCollection @([Obol.Kerberos.EncryptionType]::Aes128Sha1)
         $actual.Alias | Should-BeCollection @('a')
         $actual.Rid | Should-Be 600
     }

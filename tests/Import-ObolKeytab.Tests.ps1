@@ -30,7 +30,7 @@ Describe "Import-ObolKeytab" {
         $actual.FullName | Should-BeCollection user@EXAMPLE.TEST, user@EXAMPLE.TEST
         $actual[0].Name | Should-Be user
         $actual[0].Realm | Should-Be EXAMPLE.TEST
-        $actual[0].NameType | Should-Be ([Obol.ObolPrincipalNameType]::Principal)
+        $actual[0].NameType | Should-Be ([Obol.Kerberos.PrincipalNameType]::Principal)
         $actual.Kvno | Should-BeCollection 1, 1
         $actual.EncryptionType | Should-BeCollection Aes256Sha1, Aes128Sha1
         $actual[0].Timestamp.Kind | Should-Be Local

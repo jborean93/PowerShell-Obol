@@ -817,6 +817,58 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
             $actual[0] | Should-Be 0x60
         }
 
+        It "Traces the AS and TGS exchanges of an SSPI client" {
+            $actual = Use-ObolSspiEnvironment EXAMPLE.TEST -Principal @{
+                user = $password
+                'HTTP/web.example.test' = $null
+            } {
+                param ($kdc)
+
+                # The pin is per thread and the traced scriptblock runs on this thread.
+                Trace-ObolKdc -Kdc $kdc {
+                    $null = [ObolTests.Sspi]::GetToken('user@EXAMPLE.TEST', $plainPassword, 'HTTP/web.example.test')
+                }
+            }
+
+            # The SSP may ask without pre-authentication first, the last AS-REQ gets the TGT and the TGS-REQ the
+            # service ticket. Windows sends the RSA-MD5 body checksum the KDC accepts for the TGS-REQ.
+            $asReq = @($actual | Where-Object { $_.Request.MessageType -eq 'AsReq' })
+            $tgsReq = @($actual | Where-Object { $_.Request.MessageType -eq 'TgsReq' })
+            $actual.Count | Should-Be ($asReq.Count + $tgsReq.Count)
+            $asReq.Count | Should-BeGreaterThan 0
+            if ($asReq.Count -gt 1) {
+                foreach ($rejected in $asReq[0..($asReq.Count - 2)]) {
+                    $rejected.ErrorCode | Should-Be ([Obol.Kerberos.ErrorCode]::PreAuthRequired)
+                    $rejected.ClientName | Should-Be 'user@EXAMPLE.TEST'
+                }
+            }
+
+            $tgt = $asReq[-1]
+            $tgt.ErrorCode | Should-Be ([Obol.Kerberos.ErrorCode]::None)
+            $tgt.ClientName | Should-Be 'user@EXAMPLE.TEST'
+            $tgt.ServiceName | Should-Be 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
+            [int[]]$tgt.Request.PreAuthData.Type | Should-ContainCollection 2
+            $tgt.Reply.Ticket.DecryptedPart.Flag.HasFlag([Obol.Kerberos.TicketFlag]::Initial) | Should-BeTrue
+            $tgt.Reply.Ticket.DecryptedPart.Flag.HasFlag([Obol.Kerberos.TicketFlag]::PreAuthenticated) | Should-BeTrue
+            $tgt.Reply.Ticket.DecryptedPart.Pac.LogonInfo.UserName | Should-Be user
+            $tgt.Key.FullName | Should-BeCollection 'user@EXAMPLE.TEST', 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
+
+            $tgsReq.Count | Should-Be 1
+            $tgsReq[0].ErrorCode | Should-Be ([Obol.Kerberos.ErrorCode]::None)
+            $tgsReq[0].ClientName | Should-Be 'user@EXAMPLE.TEST'
+            $tgsReq[0].ServiceName | Should-Be 'HTTP/web.example.test@EXAMPLE.TEST'
+            [int[]]$tgsReq[0].Request.PreAuthData.Type | Should-ContainCollection 1
+            # Windows sends the RSA-MD5 body checksum the KDC accepts.
+            $tgsReq[0].Request.ApRequest.Authenticator.Checksum.ChecksumType | Should-Be 7
+            $service = $tgsReq[0].Reply.Ticket.DecryptedPart
+            $service.Key.EncryptionType | Should-Be 18
+            $tgsReq[0].Reply.Ticket.EncryptedPart.EncryptionType | Should-Be 18
+            $service.Flag.HasFlag([Obol.Kerberos.TicketFlag]::PreAuthenticated) | Should-BeTrue
+            $service.Flag.HasFlag([Obol.Kerberos.TicketFlag]::Initial) | Should-BeFalse
+            $service.Pac | Should-NotBeNull
+            $tgsReq[0].Key.FullName | Should-BeCollection 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'HTTP/web.example.test@EXAMPLE.TEST'
+        }
+
         It "Fails for an unknown service" {
             {
                 Use-ObolSspiEnvironment EXAMPLE.TEST -Principal @{ user = $password } {

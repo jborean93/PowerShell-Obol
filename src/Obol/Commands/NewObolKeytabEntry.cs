@@ -1,6 +1,7 @@
 using System;
 using System.Management.Automation;
 using System.Security;
+using Obol.Kerberos;
 using Obol.Protocol;
 
 namespace Obol.Commands;
@@ -66,7 +67,8 @@ public sealed class NewObolKeytabEntry : PSCmdlet
         ParameterSetName = KeyParameterSet
     )]
     [ValidateNotNull]
-    public ObolEncryptionType[]? EncryptionType { get; set; }
+    [ValidateSet(typeof(SupportedEncryptionTypeValues))]
+    public EncryptionType[]? EncryptionType { get; set; }
 
     [Parameter(
         ParameterSetName = PasswordParameterSet
@@ -109,7 +111,7 @@ public sealed class NewObolKeytabEntry : PSCmdlet
             return;
         }
 
-        ObolEncryptionType[]? etypes = PrincipalCommandHelper.CheckEncryptionTypes(EncryptionType, out error);
+        EncryptionType[]? etypes = PrincipalCommandHelper.CheckEncryptionTypes(EncryptionType, out error);
         if (error is not null)
         {
             ThrowTerminatingError(error);
@@ -134,17 +136,17 @@ public sealed class NewObolKeytabEntry : PSCmdlet
         }
 
         // AES256 and AES128 like a new principal, MIT ktutil and ktpass /crypto All.
-        etypes ??= [ObolEncryptionType.Aes256Sha1, ObolEncryptionType.Aes128Sha1];
+        etypes ??= PrincipalStore.DefaultEncryptionTypes;
         string salt = Salt ?? PrincipalStore.GetDefaultSalt(realm, components);
         byte[][] keys = PrincipalStore.DeriveKeys(Password, salt, etypes);
         for (int i = 0; i < etypes.Length; i++)
         {
-            WriteObject(new ObolKeytabEntry(realm, components, ObolPrincipalNameType.Principal, timestamp, Kvno,
+            WriteObject(new ObolKeytabEntry(realm, components, PrincipalNameType.Principal, timestamp, Kvno,
                 etypes[i], keys[i]));
         }
     }
 
-    private void WriteKeyEntry(string realm, string[] components, ObolEncryptionType[] etypes, DateTime timestamp)
+    private void WriteKeyEntry(string realm, string[] components, EncryptionType[] etypes, DateTime timestamp)
     {
         if (etypes.Length != 1)
         {
@@ -167,7 +169,7 @@ public sealed class NewObolKeytabEntry : PSCmdlet
             return;
         }
 
-        WriteObject(new ObolKeytabEntry(realm, components, ObolPrincipalNameType.Principal, timestamp, Kvno, etypes[0],
+        WriteObject(new ObolKeytabEntry(realm, components, PrincipalNameType.Principal, timestamp, Kvno, etypes[0],
             (byte[])Key.Clone()));
     }
 }

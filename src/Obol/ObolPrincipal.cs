@@ -1,6 +1,8 @@
 using System.Linq;
 using System.Threading;
+using Obol.Kerberos;
 using Obol.Protocol;
+using PrincipalName = Obol.Protocol.PrincipalName;
 
 namespace Obol;
 
@@ -44,7 +46,7 @@ public sealed class ObolPrincipal
     public int Kvno => State.Kvno;
 
     /// <summary>The encryption types the principal has keys for, in order of preference.</summary>
-    public ObolEncryptionType[] EncryptionType => State.EncryptionTypes;
+    public EncryptionType[] EncryptionType => State.EncryptionTypes;
 
     /// <summary>
     /// The salt sent to clients to derive the principal's keys from its password, not set for random keys.
@@ -52,7 +54,7 @@ public sealed class ObolPrincipal
     public string? Salt => State.Keys.FirstOrDefault()?.Salt;
 
     /// <summary>The options turned on for the principal, such as not requiring pre-authentication.</summary>
-    public ObolPrincipalFlag Flag => State.Flags;
+    public PacUserAccountControl Flag => State.Flags;
 
     /// <summary>The security identifier of the principal used in the PAC.</summary>
     public string Sid { get; }
