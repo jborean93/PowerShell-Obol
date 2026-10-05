@@ -36,6 +36,9 @@ Windows cannot remove the registration of a single realm, so every registration 
 
 + `Thread`: every KDC registered for any thread in the PowerShell process, including other runspaces and ones made with `Add-ObolSspiKdc`.
 + `Machine`: every KDC registered for the machine, including the ones Windows found itself, which it finds again the next time they are needed.
++ `MitRealm`: the realm and host mapping registry keys the environment created, and every KDC registered for the machine like `Machine`.
++ `DcLocator`: the NRPT rules the environment created, its DNS and LDAP ping listeners, and every KDC registered for the machine like `Machine`.
+  The DNS client cache is flushed so the realm names stop resolving straight away.
 
 Only the runspace that entered the environment can exit it, and it is exited when that runspace closes.
 This cmdlet is only supported on Windows and errors on other platforms.

@@ -37,9 +37,14 @@ public sealed class ExitObolSspiEnvironment : PSCmdlet
                 null));
         }
 
-        string action = environment.Scope == ObolSspiKdcScope.Machine
-            ? "Purge the whole KDC binding cache"
-            : "Remove all KDC pins in the process";
+        string action = environment.Scope switch
+        {
+            ObolSspiKdcScope.Machine => "Purge the whole KDC binding cache",
+            ObolSspiKdcScope.MitRealm => "Remove the realm registry keys and purge the whole KDC binding cache",
+            ObolSspiKdcScope.DcLocator =>
+                "Remove the NRPT rules, stop the DNS and LDAP listeners and purge the whole KDC binding cache",
+            _ => "Remove all KDC pins in the process",
+        };
         if (!ShouldProcess($"SSPI environment for {string.Join(", ", environment.Realms)}", action))
         {
             return;

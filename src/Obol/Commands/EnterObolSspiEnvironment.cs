@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
+using System.Net;
 using System.Runtime.Versioning;
 
 namespace Obol.Commands;
@@ -24,7 +25,7 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
     public ObolKdc[] Kdc { get; set; } = [];
 
     [Parameter]
-    [ValidateSet("Thread", "Machine")]
+    [ValidateSet("Thread", "Machine", "MitRealm", "DcLocator")]
     public ObolSspiKdcScope Scope { get; set; } = ObolSspiKdcScope.Thread;
 
     [Parameter]
@@ -46,7 +47,7 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
     {
         foreach (ObolKdc kdc in Kdc)
         {
-            if (SspiCommandHelper.CheckKdc(kdc) is ErrorRecord error)
+            if (SspiCommandHelper.CheckKdc(kdc, Scope) is ErrorRecord error)
             {
                 WriteError(error);
                 continue;
@@ -63,7 +64,12 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
             return;
         }
 
-        string target = Scope == ObolSspiKdcScope.Machine ? "machine" : "current thread";
+        string target = Scope switch
+        {
+            ObolSspiKdcScope.Thread => "current thread",
+            ObolSspiKdcScope.Machine => "machine",
+            _ => $"machine as {Scope}",
+        };
         if (!ShouldProcess(target, $"Register with Windows Kerberos {string.Join(", ", _kdcs)}"))
         {
             return;
@@ -74,8 +80,9 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
 
     /// <summary>Checks an SSPI environment can be entered, before any KDC is started or collected.</summary>
     /// <remarks>
-    /// Fails if one is already entered, if Machine is used without the rights for the binding cache, or if Thread
-    /// is used while the thread already has a pin, as exiting removes every pin in the process.
+    /// Fails if one is already entered, if a machine wide scope is used without administrator rights or the rights
+    /// for the binding cache, or if Thread is used while the thread already has a pin, as exiting removes every pin
+    /// in the process.
     /// </remarks>
     [SupportedOSPlatform("windows")]
     internal static void CheckCanEnter(PSCmdlet cmdlet, ObolSspiKdcScope scope)
@@ -85,7 +92,12 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
             cmdlet.ThrowTerminatingError(AlreadyEnteredError());
         }
 
-        if (scope == ObolSspiKdcScope.Machine)
+        if (SspiCommandHelper.CheckAdministrator(scope) is ErrorRecord adminError)
+        {
+            cmdlet.ThrowTerminatingError(adminError);
+        }
+
+        if (SspiEnvironment.IsMachineScope(scope))
         {
             // Acquired and released here so a caller without the rights fails before a KDC is started.
             try
@@ -113,7 +125,7 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
     /// <summary>Registers each KDC with the Kerberos SSP in the scope given.</summary>
     /// <param name="cmdlet">The cmdlet to write to and throw the terminating errors of.</param>
     /// <param name="kdcs">The KDCs to register, each checked with <see cref="SspiCommandHelper.CheckKdc"/>.</param>
-    /// <param name="scope">Thread or Machine.</param>
+    /// <param name="scope">How to register the KDCs, see <see cref="ObolSspiKdcScope"/>.</param>
     /// <param name="setPrompt">Add the realm to the prompt of the current runspace.</param>
     [SupportedOSPlatform("windows")]
     internal static SspiEnvironment Enter(
@@ -123,8 +135,8 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
         bool setPrompt)
     {
         // A KDC listening on all addresses is reached through loopback.
-        (string, string)[] entries = kdcs
-            .Select(k => (k.Realm, Krb5Config.GetClientAddress(k.Endpoint.Address).ToString()))
+        (string, IPAddress, ObolKdcTransport)[] entries = kdcs
+            .Select(k => (k.Realm, Krb5Config.GetClientAddress(k.Endpoint.Address), k.Transport))
             .ToArray();
 
         SspiEnvironment? environment = null;
@@ -135,6 +147,10 @@ public sealed class EnterObolSspiEnvironment : PSCmdlet
         catch (SspiKdcException e)
         {
             cmdlet.ThrowTerminatingError(SspiCommandHelper.SspiError(e));
+        }
+        catch (SspiConflictException e)
+        {
+            cmdlet.ThrowTerminatingError(SspiCommandHelper.ConflictError(e));
         }
         if (environment is null)
         {

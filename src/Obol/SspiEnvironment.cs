@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Management.Automation.Runspaces;
+using System.Net;
 using System.Runtime.Versioning;
 
 namespace Obol;
@@ -10,8 +11,8 @@ namespace Obol;
 /// </summary>
 /// <remarks>
 /// The SSP cannot remove the entry of a single realm, so exiting removes every pin in the process for
-/// <see cref="ObolSspiKdcScope.Thread"/> or purges the whole binding cache for <see cref="ObolSspiKdcScope.Machine"/>.
-/// Only one can be entered so one exit does not remove the entries another relies on.
+/// <see cref="ObolSspiKdcScope.Thread"/> or purges the whole binding cache for the machine wide scopes. Only one can be
+/// entered so one exit does not remove the entries another relies on.
 /// </remarks>
 [SupportedOSPlatform("windows")]
 internal sealed class SspiEnvironment
@@ -19,14 +20,17 @@ internal sealed class SspiEnvironment
     private static readonly object s_lock = new();
     private static SspiEnvironment? s_current;
 
-    private SspiEnvironment(ObolSspiKdcScope scope, string[] realms, Runspace? runspace)
+    private readonly SspiMachineSetup? _setup;
+
+    private SspiEnvironment(ObolSspiKdcScope scope, string[] realms, Runspace? runspace, SspiMachineSetup? setup)
     {
         Scope = scope;
         Realms = realms;
         Runspace = runspace;
+        _setup = setup;
     }
 
-    /// <summary>Whether the KDCs are pinned for a thread or in the machine binding cache.</summary>
+    /// <summary>How the KDCs were registered with the SSP.</summary>
     public ObolSspiKdcScope Scope { get; }
 
     /// <summary>The realms that were registered.</summary>
@@ -51,15 +55,22 @@ internal sealed class SspiEnvironment
         }
     }
 
+    /// <summary>Whether a scope is machine wide, it needs administrator rights and purges the binding cache.</summary>
+    public static bool IsMachineScope(ObolSspiKdcScope scope)
+        => scope is ObolSspiKdcScope.Machine or ObolSspiKdcScope.MitRealm or ObolSspiKdcScope.DcLocator;
+
     /// <summary>Registers each KDC with the SSP and makes it the entered environment.</summary>
-    /// <param name="scope">Thread pins the KDCs for the calling thread, Machine adds them to the binding cache.</param>
-    /// <param name="kdcs">The realm and address of each KDC, the address is a bare host or IP.</param>
+    /// <param name="scope">How to register the KDCs, see <see cref="ObolSspiKdcScope"/>.</param>
+    /// <param name="kdcs">The realm, the address clients use and the transports of each KDC.</param>
     /// <param name="runspace">Exits the environment when this runspace closes.</param>
     /// <returns>The entered environment, or null if one is already entered and nothing is changed.</returns>
     /// <exception cref="SspiKdcException">A KDC could not be registered, the ones added are removed.</exception>
+    /// <exception cref="SspiConflictException">
+    /// The scope would change existing Windows configuration, nothing is changed.
+    /// </exception>
     public static SspiEnvironment? TryEnter(
         ObolSspiKdcScope scope,
-        IReadOnlyList<(string Realm, string Address)> kdcs,
+        IReadOnlyList<(string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs,
         Runspace? runspace)
     {
         lock (s_lock)
@@ -69,29 +80,14 @@ internal sealed class SspiEnvironment
                 return null;
             }
 
-            try
-            {
-                Register(scope, kdcs);
-            }
-            catch (SspiKdcException)
-            {
-                try
-                {
-                    Unregister(scope);
-                }
-                catch (SspiKdcException)
-                {
-                    // The original failure is the one to report.
-                }
-                throw;
-            }
+            SspiMachineSetup? setup = Register(scope, kdcs);
 
             string[] realms = new string[kdcs.Count];
             for (int i = 0; i < kdcs.Count; i++)
             {
                 realms[i] = kdcs[i].Realm;
             }
-            s_current = new(scope, realms, runspace);
+            s_current = new(scope, realms, runspace, setup);
             if (runspace is not null)
             {
                 runspace.StateChanged += OnRunspaceStateChanged;
@@ -100,7 +96,10 @@ internal sealed class SspiEnvironment
         }
     }
 
-    /// <summary>Removes the KDCs from the SSP, every pin in the process or the whole binding cache.</summary>
+    /// <summary>
+    /// Removes the KDCs from the SSP, every pin in the process or the whole binding cache and the configuration the
+    /// scope created.
+    /// </summary>
     /// <returns>False if the environment is no longer entered, such as when its runspace closed.</returns>
     /// <exception cref="SspiKdcException">
     /// The SSP entries could not be removed, the environment is still exited so another can be entered.
@@ -119,49 +118,96 @@ internal sealed class SspiEnvironment
             {
                 Runspace.StateChanged -= OnRunspaceStateChanged;
             }
-
-            Unregister(Scope);
+            Unregister(Scope, _setup);
         }
 
         return true;
     }
 
-    private static void Register(ObolSspiKdcScope scope, IReadOnlyList<(string Realm, string Address)> kdcs)
+    private static SspiMachineSetup? Register(
+        ObolSspiKdcScope scope,
+        IReadOnlyList<(string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs)
     {
-        if (scope == ObolSspiKdcScope.Machine)
+        SspiMachineSetup? setup = null;
+        try
         {
-            // Adding a binding for a realm replaces any existing one.
-            using (SystemImpersonation.Acquire())
+            if (scope == ObolSspiKdcScope.Thread)
             {
-                foreach ((string realm, string address) in kdcs)
+                foreach ((string realm, IPAddress address, _) in kdcs)
                 {
-                    SspiKdc.AddBinding(realm, address, (int)ObolSspiKdcAddressType.Inet, (int)ObolSspiDcFlags.None);
+                    SspiKdc.PinKdc(realm, address.ToString(), (int)ObolSspiDcFlags.None);
+                    SspiPinRegistry.Add(ObolSspiKdc.ForThread(realm, address.ToString(), ObolSspiDcFlags.None));
+                }
+            }
+            else if (scope == ObolSspiKdcScope.Machine)
+            {
+                // Adding a binding for a realm replaces any existing one.
+                using (SystemImpersonation.Acquire())
+                {
+                    foreach ((string realm, IPAddress address, _) in kdcs)
+                    {
+                        SspiKdc.AddBinding(realm, address.ToString(), (int)ObolSspiKdcAddressType.Inet,
+                            (int)ObolSspiDcFlags.None);
+                    }
+                }
+            }
+            else
+            {
+                // Removes what it created itself if it fails.
+                setup = SspiMachineSetup.Apply(scope, kdcs);
+
+                // The binding cache is checked before the realm list and the DC locator, and also keeps failed
+                // lookups, so an entry for the realm from before would be used instead.
+                using (SystemImpersonation.Acquire())
+                {
+                    SspiKdc.PurgeBindings();
                 }
             }
         }
-        else
+        catch (SspiKdcException)
         {
-            foreach ((string realm, string address) in kdcs)
+            try
             {
-                SspiKdc.PinKdc(realm, address, (int)ObolSspiDcFlags.None);
-                SspiPinRegistry.Add(ObolSspiKdc.ForThread(realm, address, ObolSspiDcFlags.None));
+                Unregister(scope, setup);
             }
+            catch (SspiKdcException)
+            {
+                // The original failure is the one to report.
+            }
+            throw;
         }
+
+        return setup;
     }
 
-    private static void Unregister(ObolSspiKdcScope scope)
+    private static void Unregister(ObolSspiKdcScope scope, SspiMachineSetup? setup)
     {
-        if (scope == ObolSspiKdcScope.Machine)
-        {
-            using (SystemImpersonation.Acquire())
-            {
-                SspiKdc.PurgeBindings();
-            }
-        }
-        else
+        if (scope == ObolSspiKdcScope.Thread)
         {
             SspiKdc.UnpinAllKdcs();
             SspiPinRegistry.Clear();
+            return;
+        }
+
+        SspiKdcException? setupError = null;
+        try
+        {
+            setup?.Remove();
+        }
+        catch (SspiKdcException e)
+        {
+            setupError = e;
+        }
+
+        // A KDC found through the realm list or the DC locator is also written to the binding cache.
+        using (SystemImpersonation.Acquire())
+        {
+            SspiKdc.PurgeBindings();
+        }
+
+        if (setupError is not null)
+        {
+            throw setupError;
         }
     }
 
@@ -178,7 +224,7 @@ internal sealed class SspiEnvironment
             }
             catch (SspiKdcException)
             {
-                // Nothing can report it while the runspace closes, the entries stay until they age out.
+                // Nothing can report it while the runspace closes, the entries stay until they age out or a reboot.
             }
         }
     }

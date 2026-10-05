@@ -43,6 +43,6 @@ Cmdlets present with this initial release.
 + [Add-ObolSspiKdc](docs/en-US/Obol/Add-ObolSspiKdc.md): Points the Windows Kerberos SSP at a KDC for a realm, `-Scope Thread` (per-thread, no admin) or `-Scope Machine` (machine-wide binding cache, admin). Windows only.
 + [Get-ObolSspiKdc](docs/en-US/Obol/Get-ObolSspiKdc.md): Lists the SSPI KDC entries, `-Scope Thread` (this thread's pins) or `-Scope Machine` (the binding cache). Windows only.
 + [Clear-ObolSspiKdc](docs/en-US/Obol/Clear-ObolSspiKdc.md): Removes the SSPI KDC entries, `-Scope Process` (all pins in the process) or `-Scope Machine` (purge the binding cache). Windows only.
-+ [Enter-ObolSspiEnvironment](docs/en-US/Obol/Enter-ObolSspiEnvironment.md): Registers Obol KDCs with Windows Kerberos for the current thread or the whole machine. Windows only.
++ [Enter-ObolSspiEnvironment](docs/en-US/Obol/Enter-ObolSspiEnvironment.md): Registers Obol KDCs with Windows Kerberos for the current thread or the whole machine. `-Scope MitRealm` adds the realm like `ksetup /addkdc` and `-Scope DcLocator` answers the AD DC locator through an NRPT rule, a DNS server and an LDAP ping responder, both with volatile registry keys and administrator rights. Windows only.
 + [Exit-ObolSspiEnvironment](docs/en-US/Obol/Exit-ObolSspiEnvironment.md): Removes the KDCs registered by Enter-ObolSspiEnvironment. Windows only.
 + [Use-ObolSspiEnvironment](docs/en-US/Obol/Use-ObolSspiEnvironment.md): Runs a scriptblock with an Obol KDC registered with Windows Kerberos. Windows only.

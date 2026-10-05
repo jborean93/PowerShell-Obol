@@ -1,6 +1,9 @@
 using System;
+using System.Linq;
 using System.Management.Automation;
 using System.Net;
+using System.Runtime.Versioning;
+using System.Security.Principal;
 
 namespace Obol.Commands;
 
@@ -45,15 +48,86 @@ internal static class SspiCommandHelper
     /// <summary>The only port the Kerberos SSP contacts a KDC on.</summary>
     public const int KdcPort = 88;
 
-    /// <summary>Checks a KDC can be registered with the Kerberos SSP: it is running and listens on port 88.</summary>
+    /// <summary>
+    /// Checks a KDC can be registered with the Kerberos SSP: it is running, listens on port 88 and its realm can be
+    /// used with the scope.
+    /// </summary>
     /// <returns>The error to write, or null if the KDC can be used.</returns>
-    public static ErrorRecord? CheckKdc(ObolKdc kdc)
+    public static ErrorRecord? CheckKdc(ObolKdc kdc, ObolSspiKdcScope scope)
     {
         if (Krb5Config.CheckRunning(kdc) is ErrorRecord error)
         {
             return error;
         }
-        return kdc.Endpoint.Port == KdcPort ? null : PortError(kdc.Realm, kdc.Endpoint.Port);
+        if (kdc.Endpoint.Port != KdcPort)
+        {
+            return PortError(kdc.Realm, kdc.Endpoint.Port);
+        }
+
+        string? realmError = scope switch
+        {
+            // The realm is a registry key name.
+            ObolSspiKdcScope.MitRealm when kdc.Realm.Contains('\\') => "must not contain a backslash",
+            ObolSspiKdcScope.DcLocator when !IsDnsDomainName(kdc.Realm) =>
+                "must be a DNS domain name with at least two labels of letters, digits and hyphens",
+            _ => null,
+        };
+        if (realmError is null)
+        {
+            return null;
+        }
+
+        return new ErrorRecord(
+            new ArgumentException($"The realm '{kdc.Realm}' cannot be used with scope {scope}, it {realmError}."),
+            "InvalidSspiRealm",
+            ErrorCategory.InvalidArgument,
+            kdc);
+    }
+
+    /// <summary>
+    /// Checks the realm is a DNS name the DC locator can look up and an NRPT rule can match, such as EXAMPLE.TEST.
+    /// </summary>
+    private static bool IsDnsDomainName(string realm)
+    {
+        string[] labels = realm.Split('.');
+        if (labels.Length < 2 || realm.Length > 253)
+        {
+            return false;
+        }
+
+        foreach (string label in labels)
+        {
+            if (label.Length is 0 or > 63 || label[0] == '-' || label[^1] == '-' ||
+                !label.All(c => char.IsAsciiLetterOrDigit(c) || c == '-'))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>Checks the process is elevated, the scopes that write HKLM need administrator rights.</summary>
+    /// <returns>The error to throw, or null if the scope needs no rights or the process has them.</returns>
+    [SupportedOSPlatform("windows")]
+    public static ErrorRecord? CheckAdministrator(ObolSspiKdcScope scope)
+    {
+        if (scope is not (ObolSspiKdcScope.MitRealm or ObolSspiKdcScope.DcLocator))
+        {
+            return null;
+        }
+
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        if (new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator))
+        {
+            return null;
+        }
+
+        return new ErrorRecord(
+            new UnauthorizedAccessException(
+                $"Scope {scope} changes the machine configuration and needs PowerShell to run as administrator"),
+            "SspiScopeNeedsAdministrator",
+            ErrorCategory.PermissionDenied,
+            scope);
     }
 
     /// <summary>The error for a KDC that is not on port 88, the only port the Kerberos SSP uses.</summary>
@@ -71,6 +145,13 @@ internal static class SspiCommandHelper
             $"{cmdlet} uses the Windows Kerberos SSP and is only supported on Windows"),
         "SspiNotSupported",
         ErrorCategory.NotImplemented,
+        null);
+
+    /// <summary>Builds an error record for Windows configuration an SSPI environment would have to change.</summary>
+    public static ErrorRecord ConflictError(SspiConflictException exception) => new(
+        exception,
+        "SspiConfigurationExists",
+        ErrorCategory.ResourceExists,
         null);
 
     /// <summary>Builds an error record for a failed Kerberos SSP call.</summary>

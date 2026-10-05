@@ -1020,6 +1020,43 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
             $actual.MutualAuth | Should-BeTrue
         }
 
+        It "Gets a ticket through the <Scope> lookup" -TestCases @(
+            # A mapped realm is an MIT realm, the SSP sends no PA-DATA until the KDC asks for pre-authentication.
+            # Only a KDC found by the DC locator is written to the binding cache.
+            @{ Scope = 'MitRealm'; PreAuthData = ''; Binding = $null }
+            @{ Scope = 'DcLocator'; PreAuthData = 'PacRequest'; Binding = '127.0.0.1' }
+        ) {
+            param ($Scope, $PreAuthData, $Binding)
+
+            # A realm never used before, the DC locator also caches its results outside of the binding cache.
+            $realm = "OBOL$([Guid]::NewGuid().ToString('N').Substring(0, 8).ToUpperInvariant()).TEST"
+            $service = "HTTP/web.$($realm.ToLowerInvariant())"
+            $actual = Use-ObolSspiEnvironment $realm -Scope $Scope -Principal @{ user = $password; $service = $null } {
+                param ($kdc)
+
+                $keytab = $kdc | ConvertTo-ObolKeytab $service
+                # Trace-ObolKdc dot-sources the scriptblock, $result is set here.
+                $events = Trace-ObolKdc -Kdc $kdc {
+                    $result = [ObolTests.Sspi]::Authenticate("user@$realm", $plainPassword, $service, $service,
+                        $keytab, $systemToken)
+                }
+                [PSCustomObject]@{
+                    Result = $result
+                    Events = $events
+                    Binding = Get-ObolSspiKdc -Scope Machine | Where-Object Realm -EQ $realm
+                }
+            }
+
+            $actual.Result.ClientName | Should-Be "$($realm.Split('.')[0])\user"
+            $actual.Result.MutualAuth | Should-BeTrue
+            [string[]]$actual.Events.Request.MessageType | Should-BeCollection AsReq, AsReq, TgsReq
+            # RealmFlags TcpSupported for MitRealm, the DC locator always uses TCP.
+            [string[]]$actual.Events.Transport | Should-BeCollection Tcp, Tcp, Tcp
+            @($actual.Events[0].Request.PreAuthData.Type) -join ',' | Should-Be $PreAuthData
+            $actual.Binding.KdcAddress | Should-Be $Binding
+            Get-ObolSspiKdc -Scope Machine | Where-Object Realm -EQ $realm | Should-BeNull
+        }
+
         It "Mutually authenticates NegotiateAuthentication to a service with the exported keytab" {
             $user = New-UniqueUserName
             $actual = Use-ObolSspiEnvironment MUTUAL.TEST -Principal @{

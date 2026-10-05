@@ -10,7 +10,7 @@ namespace Obol.Commands;
 public sealed class UseObolSspiEnvironment : UseObolEnvironmentCommandBase
 {
     [Parameter]
-    [ValidateSet("Thread", "Machine")]
+    [ValidateSet("Thread", "Machine", "MitRealm", "DcLocator")]
     public ObolSspiKdcScope Scope { get; set; } = ObolSspiKdcScope.Thread;
 
     /// <summary>The SSP only uses port 88, so the KDC always listens on it.</summary>
@@ -25,9 +25,22 @@ public sealed class UseObolSspiEnvironment : UseObolEnvironmentCommandBase
         }
 
         EnterObolSspiEnvironment.CheckCanEnter(this, Scope);
+
+        // Checked again when entering, this avoids starting a KDC when it would fail anyway.
+        if (ParameterSetName == StartParameterSet && Scope is ObolSspiKdcScope.MitRealm or ObolSspiKdcScope.DcLocator)
+        {
+            try
+            {
+                SspiMachineSetup.CheckConflicts(Scope, [Realm]);
+            }
+            catch (SspiConflictException e)
+            {
+                ThrowTerminatingError(SspiCommandHelper.ConflictError(e));
+            }
+        }
     }
 
-    protected override ErrorRecord? CheckKdc(ObolKdc kdc) => SspiCommandHelper.CheckKdc(kdc);
+    protected override ErrorRecord? CheckKdc(ObolKdc kdc) => SspiCommandHelper.CheckKdc(kdc, Scope);
 
     protected override void InvokeWithKdcs(ScriptBlock scriptBlock)
     {

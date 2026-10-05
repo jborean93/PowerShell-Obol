@@ -457,3 +457,15 @@ Function Get-FreePort {
         $listener.Stop()
     }
 }
+
+Function Get-NrptRule {
+    <#
+    .SYNOPSIS
+    Gets the local NRPT rules for a namespace from the registry, the DnsClient module is not on the test
+    PSModulePath.
+    #>
+    param ([string]$Namespace)
+
+    $rules = 'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig'
+    Get-ChildItem -LiteralPath $rules | Get-ItemProperty | Where-Object { $_.Name -contains $Namespace }
+}

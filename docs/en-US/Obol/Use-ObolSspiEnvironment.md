@@ -50,7 +50,11 @@ This registers each KDC's realm with Windows Kerberos instead, so it sends the r
 `-Scope` sets which authentication uses the KDCs:
 
 + `Thread` (the default): only Kerberos authentication done on the thread the scriptblock runs on. No administrator rights are needed.
-+ `Machine`: all Kerberos authentication on the machine, including other processes and SMB. This needs administrator rights.
++ `Machine`: all Kerberos authentication on the machine, including other processes and SMB, through the KDC binding cache. This needs administrator rights.
++ `MitRealm`: all Kerberos authentication on the machine, the realm is added like `ksetup.exe /addkdc` so Windows treats it as an MIT realm. This needs administrator rights.
++ `DcLocator`: all Kerberos authentication on the machine, Windows finds the KDC like a domain controller of an Active Directory domain through a DNS server and LDAP ping responder Obol runs on UDP ports 53 and 389 of the KDC address. This needs administrator rights.
+
+See `Enter-ObolSspiEnvironment` for how the machine wide scopes differ.
 
 Programs that use MIT krb5 or Heimdal, such as `kinit` or a Python or Java client, use `Use-ObolKrb5Environment` instead.
 This cmdlet is only supported on Windows and errors on other platforms.
@@ -73,6 +77,7 @@ Windows Kerberos has some limitations:
   With `Thread` this fails if the thread already has a KDC from `Add-ObolSspiKdc`, as it would be removed.
 + With `Thread`, authentication that is not done on the scriptblock's thread does not use the KDC, such as in a job, another runspace or an async continuation, or SMB and CredSSP which Windows does on its own threads.
 + With `Machine`, Windows stops using the KDC about 10 minutes after the scriptblock starts, the `FarKdcTimeout` setting, as it only keeps a KDC added by hand for that long.
++ With `MitRealm` and `DcLocator`, it fails without starting a KDC if the realm's registry key or an NRPT rule for the realm already exists, existing configuration is never changed.
 
 Only one SSPI environment can be entered in the process at a time, so this fails without starting a KDC if `Enter-ObolSspiEnvironment` or another `Use-ObolSspiEnvironment` has one entered.
 It can be used inside `Use-ObolKrb5Environment`, or the other way around, to configure both environment types.
@@ -129,7 +134,18 @@ Use-ObolSspiEnvironment -Realm EXAMPLE.TEST -Scope Machine {
 Registers the KDC for every process on the machine, so SMB, which Windows runs on its own threads, uses it too.
 This needs an elevated session.
 
-### Example 4: Configure Windows Kerberos and the krb5 environment
+### Example 4: Run with the KDC found like a domain controller
+
+```powershell
+Use-ObolSspiEnvironment -Realm EXAMPLE.TEST -Scope DcLocator {
+    nltest.exe /dsgetdc:EXAMPLE.TEST /kdc
+}
+```
+
+Windows finds the KDC through the DNS records and LDAP ping an Active Directory domain controller answers, `nltest.exe` shows `kdc1.example.test` as the domain controller.
+This needs an elevated session.
+
+### Example 5: Configure Windows Kerberos and the krb5 environment
 
 ```powershell
 Use-ObolKrb5Environment -Realm EXAMPLE.TEST -Port 88 {
@@ -381,6 +397,8 @@ Which authentication uses the KDCs while the scriptblock runs.
 
 + `Thread`: Kerberos authentication done on the thread the scriptblock runs on, like `Add-ObolSspiKdc -Scope Thread`. No administrator rights are needed.
 + `Machine`: all Kerberos authentication on the machine, like `Add-ObolSspiKdc -Scope Machine`. This needs administrator rights, without them it fails before the KDC is started.
++ `MitRealm`: all Kerberos authentication on the machine, the realm and its KDCs are added to the registry like `ksetup.exe /addkdc`. This needs administrator rights, without them it fails before the KDC is started.
++ `DcLocator`: all Kerberos authentication on the machine, an NRPT rule sends the realm's DNS queries to a DNS server and LDAP ping responder Obol runs. The realm must be a DNS name. This needs administrator rights, without them it fails before the KDC is started.
 
 ```yaml
 Type: Obol.ObolSspiKdcScope
