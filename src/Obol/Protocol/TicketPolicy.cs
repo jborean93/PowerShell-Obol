@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
-using Kerberos.NET.Crypto;
 using Kerberos.NET.Entities;
+using Obol.Kerberos;
 
 namespace Obol.Protocol;
 
@@ -21,7 +21,9 @@ internal static class TicketPolicy
     /// Selects the session key type, the first type the client requested the service has a key for. Like AD this
     /// limits the session key to the types the service supports.
     /// </summary>
-    public static EncryptionType? SelectSessionKeyType(IEnumerable<EncryptionType> requested, KdcPrincipal service)
+    public static EncryptionType? SelectSessionKeyType(
+        IEnumerable<EncryptionType> requested,
+        KdcPrincipal service)
     {
         foreach (EncryptionType etype in requested)
         {
@@ -42,7 +44,7 @@ internal static class TicketPolicy
     public static TicketTimes Compute(
         KrbKdcReqBody body,
         DateTimeOffset now,
-        ref TicketFlags flags,
+        ref TicketFlag flags,
         DateTimeOffset? maxEndTime,
         DateTimeOffset? maxRenewTill)
     {
@@ -52,11 +54,12 @@ internal static class TicketPolicy
         DateTimeOffset till = body.Till > start ? body.Till : DateTimeOffset.MaxValue;
         DateTimeOffset end = Min(till, start + MaximumLifetime, maxEndTime);
 
-        bool renewableOk = body.KdcOptions.HasFlag(KdcOptions.RenewableOk) && till > end;
-        if (body.KdcOptions.HasFlag(KdcOptions.Renewable) || renewableOk)
+        KdcOption options = body.KdcOptions.ToObol();
+        bool renewableOk = options.HasFlag(KdcOption.RenewableOk) && till > end;
+        if (options.HasFlag(KdcOption.Renewable) || renewableOk)
         {
             // RENEWABLE-OK asks for a renewable ticket up to the requested till instead.
-            DateTimeOffset requested = body.KdcOptions.HasFlag(KdcOptions.Renewable) && body.RTime > start
+            DateTimeOffset requested = options.HasFlag(KdcOption.Renewable) && body.RTime > start
                 ? body.RTime.Value
                 : renewableOk ? till : DateTimeOffset.MaxValue;
             DateTimeOffset renewTill = Min(requested, start + MaximumRenewableLifetime, maxRenewTill);
@@ -64,7 +67,7 @@ internal static class TicketPolicy
             // A renew-till not after the end time gives nothing to renew.
             if (renewTill > end)
             {
-                flags |= TicketFlags.Renewable;
+                flags |= TicketFlag.Renewable;
                 return new TicketTimes(start, end, renewTill);
             }
         }

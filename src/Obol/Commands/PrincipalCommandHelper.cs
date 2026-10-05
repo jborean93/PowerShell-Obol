@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Management.Automation;
 using System.Security;
+using Obol.Kerberos;
 using Obol.Protocol;
+using PrincipalName = Obol.Protocol.PrincipalName;
 
 namespace Obol.Commands;
 
@@ -123,29 +125,34 @@ internal static class PrincipalCommandHelper
         return parsed;
     }
 
-    /// <summary>Checks the flags only contain defined values.</summary>
+    /// <summary>Checks the flags only contain the account control bits a principal can have.</summary>
+    /// <remarks>
+    /// A ValidateSet cannot restrict a flags parameter as it checks the combined value, so the bits are checked here
+    /// for the parameter and for a setting cast from a hashtable.
+    /// </remarks>
     /// <returns>The error to write, or null if the flags are valid.</returns>
-    public static ErrorRecord? CheckFlags(ObolPrincipalFlag flags)
+    public static ErrorRecord? CheckFlags(PacUserAccountControl flags)
     {
-        // PowerShell binding rejects undefined values but [Enum]::ToObject can still create one.
-        ObolPrincipalFlag known = Enum.GetValues<ObolPrincipalFlag>().Aggregate((a, b) => a | b);
-        if ((flags & ~known) == 0)
+        PacUserAccountControl unsupported = flags & ~PrincipalStore.SupportedAccountControl;
+        if (unsupported == PacUserAccountControl.None)
         {
             return null;
         }
 
         return new ErrorRecord(
             new ArgumentException(
-                $"Flag value {(int)flags} contains values that are not supported, valid values are " +
-                string.Join(", ", Enum.GetNames<ObolPrincipalFlag>())),
+                $"Flag '{unsupported}' is not supported, valid values are None, " +
+                string.Join(", ", Enum.GetValues<PacUserAccountControl>()
+                    .Where(f => f != PacUserAccountControl.None
+                        && PrincipalStore.SupportedAccountControl.HasFlag(f)))),
             "InvalidFlag",
             ErrorCategory.InvalidArgument,
             flags);
     }
 
-    /// <summary>Checks the encryption types are not empty, unique and defined.</summary>
+    /// <summary>Checks the encryption types are not empty, unique and ones a principal can have keys for.</summary>
     /// <returns>The encryption types, or null if not set or invalid.</returns>
-    public static ObolEncryptionType[]? CheckEncryptionTypes(ObolEncryptionType[]? types, out ErrorRecord? error)
+    public static EncryptionType[]? CheckEncryptionTypes(EncryptionType[]? types, out ErrorRecord? error)
     {
         error = null;
         if (types is null)
@@ -163,15 +170,15 @@ internal static class PrincipalCommandHelper
             return null;
         }
 
-        // PowerShell binding rejects undefined values but [Enum]::ToObject can still create one.
-        foreach (ObolEncryptionType type in types)
+        // The parameters have a ValidateSet of the supported types but a setting cast from a hashtable does not.
+        foreach (EncryptionType type in types)
         {
-            if (!Enum.IsDefined(type))
+            if (!PrincipalStore.SupportedEncryptionTypes.Contains(type))
             {
                 error = new ErrorRecord(
                     new ArgumentException(
                         $"EncryptionType '{type}' is not supported, valid values are " +
-                        string.Join(", ", Enum.GetNames<ObolEncryptionType>())),
+                        string.Join(", ", PrincipalStore.SupportedEncryptionTypes)),
                     "InvalidEncryptionType",
                     ErrorCategory.InvalidArgument,
                     types);
@@ -187,7 +194,7 @@ internal static class PrincipalCommandHelper
     public static ErrorRecord? CheckKeyParameters(
         SecureString? password,
         bool newRandomKey,
-        ObolEncryptionType[]? encryptionTypes,
+        EncryptionType[]? encryptionTypes,
         ObolKeytabEntry[]? key,
         int? kvno,
         string? salt)

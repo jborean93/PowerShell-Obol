@@ -2,7 +2,9 @@ using System;
 using System.Linq;
 using System.Management.Automation;
 using System.Security;
+using Obol.Kerberos;
 using Obol.Protocol;
+using PrincipalName = Obol.Protocol.PrincipalName;
 
 namespace Obol.Commands;
 
@@ -51,7 +53,7 @@ public sealed class NewObolPrincipal : PSCmdlet
     [Parameter(
         ParameterSetName = KeyParameterSet
     )]
-    public ObolPrincipalFlag Flag { get; set; }
+    public PacUserAccountControl Flag { get; set; }
 
     [Parameter(
         ParameterSetName = RandomParameterSet
@@ -60,7 +62,8 @@ public sealed class NewObolPrincipal : PSCmdlet
         ParameterSetName = PasswordParameterSet
     )]
     [ValidateNotNull]
-    public ObolEncryptionType[]? EncryptionType { get; set; }
+    [ValidateSet(typeof(SupportedEncryptionTypeValues))]
+    public EncryptionType[]? EncryptionType { get; set; }
 
     [Parameter(
         ParameterSetName = RandomParameterSet
@@ -176,7 +179,7 @@ public sealed class NewObolPrincipal : PSCmdlet
             return null;
         }
 
-        ObolEncryptionType[]? etypes = PrincipalCommandHelper.CheckEncryptionTypes(setting.EncryptionType, out error);
+        EncryptionType[]? etypes = PrincipalCommandHelper.CheckEncryptionTypes(setting.EncryptionType, out error);
         if (error is not null)
         {
             return null;

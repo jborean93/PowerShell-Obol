@@ -48,7 +48,7 @@ public class PrincipalTests
         KrbApReq apReq = await client.GetServiceTicket(ServiceName);
 
         // Decrypting the ticket with the service's key checks it was issued for the service and has the PAC.
-        KerberosKey serviceKey = service.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey serviceKey = service.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         KerberosAuthenticator authenticator = new(new KerberosValidator(serviceKey));
         ClaimsIdentity identity = await authenticator.Authenticate(apReq.EncodeGssApi());
 
@@ -129,7 +129,7 @@ public class PrincipalTests
     public async Task FailsWithoutPreAuthWithUnsupportedEncryptionType()
     {
         using TestKdc kdc = new();
-        kdc.AddUser("user", flags: ObolPrincipalFlag.DoesNotRequirePreAuth);
+        kdc.AddUser("user", flags: Kerberos.PacUserAccountControl.DontRequirePreAuth);
 
         // RC4 is not supported so the KDC has no key to encrypt the reply with. With pre-auth required the client
         // fails before reaching the KDC on Unix as it cannot derive an RC4 key without MD4.
@@ -149,13 +149,13 @@ public class PrincipalTests
     {
         using TestKdc kdc = new();
         ObolPrincipal principal = kdc.Store.Create(["HTTP", "test.com"], TestKdc.ToSecureString(TestKdc.Password),
-            ObolPrincipalFlag.None, aliases: [["test"]]);
+            Kerberos.PacUserAccountControl.None, aliases: [["test"]]);
 
         // The keys use the salt of the principal's name, the client gets it from PA-ETYPE-INFO2.
         using KerberosClient client = kdc.CreateClient();
         await client.Authenticate(new KerberosPasswordCredential("test", TestKdc.Password, TestKdc.Realm));
 
-        await Assert.That(principal.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!.Salt)
+        await Assert.That(principal.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!.Salt)
             .IsEqualTo("EXAMPLE.TESTHTTPtest.com");
     }
 
@@ -202,7 +202,7 @@ public class PrincipalTests
     public async Task AuthenticatesWithoutPreAuth()
     {
         using TestKdc kdc = new();
-        kdc.AddUser("user", flags: ObolPrincipalFlag.DoesNotRequirePreAuth);
+        kdc.AddUser("user", flags: Kerberos.PacUserAccountControl.DontRequirePreAuth);
         kdc.AddService(ServiceName);
 
         using KerberosClient client = kdc.CreateClient();
@@ -273,10 +273,10 @@ public class PrincipalTests
         ObolPrincipal user = kdc.AddUser("HTTP/web.example.test");
 
         // RFC 4120 4. the realm followed by each component.
-        KerberosKey key = user.State.GetKey(EncryptionType.AES256_CTS_HMAC_SHA1_96)!;
+        KerberosKey key = user.State.GetKey(Kerberos.EncryptionType.Aes256Sha1)!;
         await Assert.That(key.Salt).IsEqualTo("EXAMPLE.TESTHTTPweb.example.test");
         await Assert.That(user.Kvno).IsEqualTo(1);
         await Assert.That(user.EncryptionType).IsEquivalentTo(
-            [ObolEncryptionType.Aes256Sha1, ObolEncryptionType.Aes128Sha1]);
+            [Kerberos.EncryptionType.Aes256Sha1, Kerberos.EncryptionType.Aes128Sha1]);
     }
 }

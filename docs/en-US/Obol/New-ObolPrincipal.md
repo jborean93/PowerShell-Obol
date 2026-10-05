@@ -27,8 +27,8 @@ New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> -Setting <ObolPrincipalSetting
 ### Random (Default)
 
 ```
-New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> [-Flag <ObolPrincipalFlag>]
- [-EncryptionType <ObolEncryptionType[]>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [-WhatIf]
+New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> [-Flag <PacUserAccountControl>]
+ [-EncryptionType <EncryptionType[]>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [-WhatIf]
  [-Confirm] [<CommonParameters>]
 ```
 
@@ -36,7 +36,7 @@ New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> [-Flag <ObolPrincipalFlag>]
 
 ```
 New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> -Password <securestring>
- [-Flag <ObolPrincipalFlag>] [-EncryptionType <ObolEncryptionType[]>] [-Alias <string[]>]
+ [-Flag <PacUserAccountControl>] [-EncryptionType <EncryptionType[]>] [-Alias <string[]>]
  [-Rid <int>] [-Kvno <int>] [-Salt <string>] [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
@@ -44,7 +44,7 @@ New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> -Password <securestring>
 
 ```
 New-ObolPrincipal [-Name] <string> -Kdc <ObolKdc> -Key <ObolKeytabEntry[]>
- [-Flag <ObolPrincipalFlag>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [-Salt <string>]
+ [-Flag <PacUserAccountControl>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [-Salt <string>]
  [-WhatIf] [-Confirm] [<CommonParameters>]
 ```
 
@@ -68,7 +68,7 @@ Use `-Key` to give the principal the keys of an existing keytab instead, the pri
 A principal can have aliases, other names the KDC finds it by, like the service principal names of an AD account.
 A ticket for an alias has the alias as its service name and is encrypted with the principal's key.
 
-Pre-authentication with an encrypted timestamp is required unless `-Flag DoesNotRequirePreAuth` is set.
+Pre-authentication with an encrypted timestamp is required unless `-Flag DontRequirePreAuth` is set.
 
 Tickets include a PAC with a SID for the principal and the Domain Users group (RID 513) as its primary group.
 The SIDs are based on the `DomainSid` of the KDC and each principal gets the next RID, starting at 1000, unless `-Rid` is set.
@@ -96,7 +96,7 @@ Creates the principal `HTTP/web.example.test@EXAMPLE.TEST` with random keys.
 ### Example 3: Create a user that does not require pre-authentication
 
 ```powershell
-New-ObolPrincipal -Kdc $kdc -Name roast -Password $password -Flag DoesNotRequirePreAuth
+New-ObolPrincipal -Kdc $kdc -Name roast -Password $password -Flag DontRequirePreAuth
 ```
 
 Creates a user the KDC issues a ticket to without pre-authentication, for example to test the detection of AS-REP roasting.
@@ -146,7 +146,7 @@ Creates the principal `Administrator@EXAMPLE.TEST` with the SID of the built-in 
 ### Example 7: Create a principal from settings
 
 ```powershell
-$setting = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth
+$setting = New-ObolPrincipalSetting -Password $password -Flag DontRequirePreAuth
 $kdc | New-ObolPrincipal roast -Setting $setting
 ```
 
@@ -220,7 +220,7 @@ The encryption types to create keys for, in order of preference, defaults to `Ae
 The values are `Aes128Sha1`, `Aes256Sha1`, `Aes128Sha256` and `Aes256Sha384`, see [ENCRYPTION TYPES in about_Obol](./about_Obol.md#encryption-types) for each type and how the order is used.
 
 ```yaml
-Type: Obol.ObolEncryptionType[]
+Type: Obol.Kerberos.EncryptionType[]
 DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
@@ -249,10 +249,10 @@ HelpMessage: ''
 ### -Flag
 
 Options to turn on for the principal, defaults to `None`.
-The values are `None`, `DoesNotRequirePreAuth`, `NotDelegated`, `TrustedForDelegation` and `NoAuthDataRequired`, see [PRINCIPAL FLAGS in about_Obol](./about_Obol.md#principal-flags) for what each one does.
+The values are `None`, `DontRequirePreAuth`, `NotDelegated`, `TrustedForDelegation` and `NoAuthDataRequired`, see [PRINCIPAL FLAGS in about_Obol](./about_Obol.md#principal-flags) for what each one does.
 
 ```yaml
-Type: Obol.ObolPrincipalFlag
+Type: Obol.Kerberos.PacUserAccountControl
 DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
@@ -278,7 +278,7 @@ ParameterSets:
 DontShow: false
 AcceptedValues:
 - None
-- DoesNotRequirePreAuth
+- DontRequirePreAuth
 - NotDelegated
 - TrustedForDelegation
 - NoAuthDataRequired
@@ -555,7 +555,7 @@ It has the properties:
 - `Alias`: Other names the KDC finds the principal by
 - `Kvno`: The key version number, it increases each time `Set-ObolPrincipal` sets new keys
 - `EncryptionType`: The encryption types the principal has keys for, in order of preference
-- `Flag`: The options turned on for the principal, such as `DoesNotRequirePreAuth`
+- `Flag`: The options turned on for the principal, such as `DontRequirePreAuth`
 - `Sid`: The SID of the principal used in the PAC
 
 The object reflects changes made later with `Set-ObolPrincipal`.

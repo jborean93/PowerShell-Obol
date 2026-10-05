@@ -76,7 +76,7 @@ $password = Read-Host -AsSecureString -Prompt Password
 Start-ObolKdc -Realm EXAMPLE.TEST -Principal ([ordered]@{
     user = $password
     'HTTP/web.example.test' = $null
-    roast = New-ObolPrincipalSetting -Password $password -Flag DoesNotRequirePreAuth
+    roast = New-ObolPrincipalSetting -Password $password -Flag DontRequirePreAuth
 })
 ```
 
@@ -90,7 +90,7 @@ $kdc = Start-ObolKdc -Realm EXAMPLE.TEST
 $password = Read-Host -AsSecureString -Prompt Password
 $kdc | New-ObolPrincipal user -Password $password
 $kdc | New-ObolPrincipal HTTP/web.example.test
-$kdc | New-ObolPrincipal roast -Password $password -Flag DoesNotRequirePreAuth
+$kdc | New-ObolPrincipal roast -Password $password -Flag DontRequirePreAuth
 ```
 
 Creates the same principals as the previous example with `New-ObolPrincipal` after the KDC has started.
@@ -378,6 +378,8 @@ An invalid request never stops the KDC.
 
 Calling `Dispose()` on the object stops the KDC like `Stop-ObolKdc`.
 
+The object raises the .NET event `RequestProcessed` with an `ObolKdcEvent` for each request the KDC answers, see [Trace-ObolKdc](./Trace-ObolKdc.md) and [TRACING REQUESTS in about_Obol](./about_Obol.md#tracing-requests).
+
 ## NOTES
 
 The KDC is tied to the runspace that started it and is stopped when that runspace is closed.
@@ -388,4 +390,5 @@ The KDC is tied to the runspace that started it and is stopped when that runspac
 - [Get-ObolKdc](./Get-ObolKdc.md)
 - [New-ObolPrincipal](./New-ObolPrincipal.md)
 - [Stop-ObolKdc](./Stop-ObolKdc.md)
+- [Trace-ObolKdc](./Trace-ObolKdc.md)
 - [about_Obol](./about_Obol.md)

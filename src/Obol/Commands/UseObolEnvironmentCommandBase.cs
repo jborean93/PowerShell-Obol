@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Management.Automation;
-using System.Management.Automation.Language;
 using System.Net;
 
 namespace Obol.Commands;
@@ -146,68 +145,5 @@ public abstract class UseObolEnvironmentCommandBase : PSCmdlet
 
     /// <summary>Runs the scriptblock with the KDCs as arguments, like the call or dot-source operator.</summary>
     protected void Invoke(ScriptBlock scriptBlock)
-    {
-        // The scriptblock is copied without its session state affinity, so -NoNewScope dot-sources it into the
-        // caller's scope. Each KDC is a separate argument. The parameters of the wrapper are not set in the caller's
-        // scope.
-        ScriptBlock wrapper = CreateWrapper(NoNewScope ? TokenKind.Dot : TokenKind.Ampersand);
-        object[] args =
-        [
-            ScriptBlockHelper.StripScriptBlockAffinity(scriptBlock),
-            _kdcs.ToArray(),
-        ];
-
-        // A steppable pipeline started with this cmdlet writes every stream through it, so redirection and the
-        // common parameters of this cmdlet apply like they would to the scriptblock.
-        using SteppablePipeline pipeline = wrapper.GetSteppablePipeline(CommandOrigin.Internal, args);
-        pipeline.Begin(this);
-
-        // Without input a pipeline still runs the process block once, like & { process { } } does.
-        pipeline.Process();
-        pipeline.End();
-    }
-
-    /// <summary>Creates <c>param ($ScriptBlock, $Kdc) &amp; $ScriptBlock @Kdc</c> at this cmdlet's position.</summary>
-    /// <remarks>
-    /// $MyInvocation in the scriptblock is created from the position of the command that invokes it, so it shows the
-    /// line that called this cmdlet like <c>&amp; { ... }</c> would, rather than a position in generated text.
-    /// </remarks>
-    private ScriptBlock CreateWrapper(TokenKind invocationOperator)
-    {
-        // Only the first line of a command that spans several lines is known.
-        string file = MyInvocation.ScriptName;
-        string line = MyInvocation.Line;
-        int lineNumber = Math.Max(MyInvocation.ScriptLineNumber, 1);
-        int column = Math.Max(MyInvocation.OffsetInLine, 1);
-        IScriptExtent extent = new ScriptExtent(
-            new ScriptPosition(file, lineNumber, column, line),
-            new ScriptPosition(file, lineNumber, Math.Max(line.Length + 1, column), line));
-
-        ParameterAst[] parameters =
-        [
-            new(extent, new VariableExpressionAst(extent, "ScriptBlock", splatted: false), [], null),
-            new(extent, new VariableExpressionAst(extent, "Kdc", splatted: false), [], null),
-        ];
-        CommandAst command = new(
-            extent,
-            [
-                new VariableExpressionAst(extent, "ScriptBlock", splatted: false),
-                new VariableExpressionAst(extent, "Kdc", splatted: true),
-            ],
-            invocationOperator,
-            null);
-        NamedBlockAst end = new(
-            extent,
-            TokenKind.End,
-            new StatementBlockAst(extent, [new PipelineAst(extent, command)], null),
-            unnamed: true);
-
-        return new ScriptBlockAst(
-            extent,
-            new ParamBlockAst(extent, [], parameters),
-            beginBlock: null,
-            processBlock: null,
-            endBlock: end,
-            dynamicParamBlock: null).GetScriptBlock();
-    }
+        => ScriptBlockHelper.Invoke(this, scriptBlock, [.. _kdcs], NoNewScope);
 }

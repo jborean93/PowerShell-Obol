@@ -1,4 +1,5 @@
 using System.Security;
+using Obol.Kerberos;
 
 namespace Obol;
 
@@ -13,10 +14,10 @@ public sealed class ObolPrincipalSetting
     public SecureString? Password { get; set; }
 
     /// <summary>The options to turn on for the principal.</summary>
-    public ObolPrincipalFlag Flag { get; set; }
+    public PacUserAccountControl Flag { get; set; }
 
     /// <summary>The encryption types to create keys for in order of preference, AES256 and AES128 if not set.</summary>
-    public ObolEncryptionType[]? EncryptionType { get; set; }
+    public EncryptionType[]? EncryptionType { get; set; }
 
     /// <summary>Other names the KDC finds the principal by.</summary>
     public string[]? Alias { get; set; }

@@ -1,12 +1,14 @@
 using System.Linq;
 using Kerberos.NET.Crypto;
+using Obol.Kerberos;
+using EncryptionType = Obol.Kerberos.EncryptionType;
 
 namespace Obol.Protocol;
 
 /// <summary>The values of a principal that can change, replaced as a whole so readers see a consistent set.</summary>
 internal sealed class PrincipalState
 {
-    public PrincipalState(KerberosKey[] keys, int kvno, ObolPrincipalFlag flags, string[] aliases)
+    public PrincipalState(KerberosKey[] keys, int kvno, PacUserAccountControl flags, string[] aliases)
     {
         Keys = keys;
         Kvno = kvno;
@@ -19,13 +21,14 @@ internal sealed class PrincipalState
 
     public int Kvno { get; }
 
-    public ObolPrincipalFlag Flags { get; }
+    public PacUserAccountControl Flags { get; }
 
     /// <summary>The other names the principal can be found by.</summary>
     public string[] Aliases { get; }
 
     /// <summary>The encryption types of the keys in order of preference.</summary>
-    public ObolEncryptionType[] EncryptionTypes => [.. Keys.Select(k => (ObolEncryptionType)k.EncryptionType)];
+    public EncryptionType[] EncryptionTypes => [.. Keys.Select(k => k.EncryptionType.ToObol())];
 
-    public KerberosKey? GetKey(EncryptionType etype) => Keys.FirstOrDefault(k => k.EncryptionType == etype);
+    public KerberosKey? GetKey(EncryptionType etype)
+        => Keys.FirstOrDefault(k => k.EncryptionType.ToObol() == etype);
 }

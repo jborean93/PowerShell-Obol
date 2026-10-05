@@ -11,6 +11,7 @@ Cmdlets present with this initial release.
 + [Start-ObolKdc](docs/en-US/Obol/Start-ObolKdc.md): Starts an Obol Kerberos KDC.
 + [Get-ObolKdc](docs/en-US/Obol/Get-ObolKdc.md): Gets the Obol KDCs running in the current runspace.
 + [Stop-ObolKdc](docs/en-US/Obol/Stop-ObolKdc.md): Stops an Obol KDC.
++ [Trace-ObolKdc](docs/en-US/Obol/Trace-ObolKdc.md): Outputs the requests Obol KDCs answer as they happen, or the ones made while a scriptblock runs.
 
 ### Principals
 

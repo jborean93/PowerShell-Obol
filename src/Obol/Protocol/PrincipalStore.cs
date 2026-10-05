@@ -9,6 +9,9 @@ using System.Security;
 using System.Security.Cryptography;
 using Kerberos.NET.Crypto;
 using Kerberos.NET.Entities.Pac;
+using Obol.Kerberos;
+using EncryptionType = Obol.Kerberos.EncryptionType;
+using KrbEncryptionType = Kerberos.NET.Crypto.EncryptionType;
 
 namespace Obol.Protocol;
 
@@ -18,18 +21,27 @@ internal sealed class PrincipalStore
     /// <summary>The encryption types keys can be created for, in the default order of preference.</summary>
     internal static readonly EncryptionType[] SupportedEncryptionTypes =
     [
-        EncryptionType.AES256_CTS_HMAC_SHA1_96,
-        EncryptionType.AES128_CTS_HMAC_SHA1_96,
-        EncryptionType.AES256_CTS_HMAC_SHA384_192,
-        EncryptionType.AES128_CTS_HMAC_SHA256_128,
+        EncryptionType.Aes256Sha1,
+        EncryptionType.Aes128Sha1,
+        EncryptionType.Aes256Sha384,
+        EncryptionType.Aes128Sha256,
     ];
 
     /// <summary>The encryption types a new principal gets keys for, the AD and MIT defaults.</summary>
     internal static readonly EncryptionType[] DefaultEncryptionTypes =
     [
-        EncryptionType.AES256_CTS_HMAC_SHA1_96,
-        EncryptionType.AES128_CTS_HMAC_SHA1_96,
+        EncryptionType.Aes256Sha1,
+        EncryptionType.Aes128Sha1,
     ];
+
+    /// <summary>
+    /// The account control bits a principal can have set, the ones the KDC acts on. They are the MS-SAMR USER_* values
+    /// the PAC carries, the AD userAccountControl numbers differ.
+    /// </summary>
+    internal const PacUserAccountControl SupportedAccountControl = PacUserAccountControl.DontRequirePreAuth
+        | PacUserAccountControl.NotDelegated
+        | PacUserAccountControl.TrustedForDelegation
+        | PacUserAccountControl.NoAuthDataRequired;
 
     /// <summary>The well known RID of the krbtgt account in AD.</summary>
     private const uint KrbtgtRid = 502;
@@ -67,7 +79,7 @@ internal sealed class PrincipalStore
         // The krbtgt has a key for every type so any client can use the session key it prefers.
         Krbtgt = Add(
             ["krbtgt", realm],
-            new PrincipalState(CreateRandomKeys(SupportedEncryptionTypes, 1), 1, ObolPrincipalFlag.None, []),
+            new PrincipalState(CreateRandomKeys(SupportedEncryptionTypes, 1), 1, PacUserAccountControl.None, []),
             KrbtgtRid);
     }
 
@@ -142,15 +154,15 @@ internal sealed class PrincipalStore
     public ObolPrincipal Create(
         string[] components,
         SecureString? password,
-        ObolPrincipalFlag flags,
-        ObolEncryptionType[]? encryptionTypes = null,
+        PacUserAccountControl flags,
+        EncryptionType[]? encryptionTypes = null,
         string[][]? aliases = null,
         uint? rid = null,
         string? salt = null,
         ImportedKeys? importedKeys = null,
         int? kvno = null)
     {
-        EncryptionType[] etypes = ToEncryptionTypes(encryptionTypes) ?? DefaultEncryptionTypes;
+        EncryptionType[] etypes = encryptionTypes ?? DefaultEncryptionTypes;
         string keySalt = salt ?? GetSalt(components);
         int keyKvno = kvno ?? importedKeys?.Kvno ?? 1;
         KerberosKey[] keys;
@@ -217,8 +229,8 @@ internal sealed class PrincipalStore
         ObolPrincipal principal,
         SecureString? password = null,
         bool newRandomKey = false,
-        ObolEncryptionType[]? encryptionTypes = null,
-        ObolPrincipalFlag? flags = null,
+        EncryptionType[]? encryptionTypes = null,
+        PacUserAccountControl? flags = null,
         string[][]? aliases = null,
         string? salt = null,
         ImportedKeys? importedKeys = null,
@@ -227,7 +239,7 @@ internal sealed class PrincipalStore
         // Derive the keys outside the lock, the iterations take a while. The kvno is set under the lock as another
         // update may finish while the keys are derived.
         PrincipalState current = principal.State;
-        EncryptionType[] etypes = ToEncryptionTypes(encryptionTypes) ?? [.. current.Keys.Select(k => k.EncryptionType)];
+        EncryptionType[] etypes = encryptionTypes ?? current.EncryptionTypes;
         string keySalt = salt ?? GetSalt(principal.Components);
         KerberosKey[]? newKeys = null;
         if (importedKeys is not null)
@@ -375,9 +387,6 @@ internal sealed class PrincipalStore
         }
     }
 
-    private static EncryptionType[]? ToEncryptionTypes(ObolEncryptionType[]? types)
-        => types is null ? null : [.. types.Select(t => (EncryptionType)t)];
-
     private static KerberosKey[] SelectExistingKeys(
         ObolPrincipal principal,
         PrincipalState state,
@@ -388,7 +397,7 @@ internal sealed class PrincipalStore
         {
             keys[i] = state.GetKey(etypes[i]) ?? throw new PrincipalStoreException(
                 PrincipalStoreError.InvalidEncryptionType,
-                $"The principal '{principal.FullName}' has no {(ObolEncryptionType)etypes[i]} key, set a password " +
+                $"The principal '{principal.FullName}' has no {etypes[i]} key, set a password " +
                 "or new random key to create keys for new encryption types");
         }
         return keys;
@@ -399,7 +408,7 @@ internal sealed class PrincipalStore
         return [.. importedKeys.Keys.Select(k => new KerberosKey(
             key: k.Value.ToArray(),
             salt: salt,
-            etype: (EncryptionType)k.Type,
+            etype: k.Type.ToKerberosNet(),
             kvno: kvno))];
     }
 
@@ -408,16 +417,13 @@ internal sealed class PrincipalStore
     /// <param name="salt">The salt to derive the keys with.</param>
     /// <param name="etypes">The encryption types to derive a key for.</param>
     /// <returns>The key values in the order of the encryption types.</returns>
-    public static byte[][] DeriveKeys(SecureString password, string salt, ObolEncryptionType[] etypes)
+    public static byte[][] DeriveKeys(SecureString password, string salt, EncryptionType[] etypes)
     {
-        return [.. CreatePasswordKeys(password, salt, ToEncryptionTypes(etypes)!, 0).Select(k => k.GetKey().ToArray())];
+        return [.. CreatePasswordKeys(password, salt, etypes, 0).Select(k => k.GetKey().ToArray())];
     }
 
     /// <summary>The default salt from RFC 4120 4. of a principal in a realm.</summary>
     public static string GetDefaultSalt(string realm, string[] components) => realm + string.Concat(components);
-
-    /// <summary>The size in bytes of a key of the encryption type.</summary>
-    public static int GetKeySize(ObolEncryptionType etype) => GetKeySize((EncryptionType)etype);
 
     /// <summary>The default salt from RFC 4120 4., the realm followed by each name component.</summary>
     private string GetSalt(string[] components) => GetDefaultSalt(Realm, components);
@@ -427,7 +433,7 @@ internal sealed class PrincipalStore
         // The AES random-to-key function is the identity, RFC 3962 6. and RFC 8009 3.
         return [.. etypes.Select(etype => new KerberosKey(
             key: RandomNumberGenerator.GetBytes(GetKeySize(etype)),
-            etype: etype,
+            etype: etype.ToKerberosNet(),
             kvno: kvno))];
     }
 
@@ -447,11 +453,12 @@ internal sealed class PrincipalStore
 
             return [.. etypes.Select(etype =>
             {
-                KerberosKey passwordKey = new(password: passwordBytes, salt: salt, etype: etype);
+                KrbEncryptionType krbEType = etype.ToKerberosNet();
+                KerberosKey passwordKey = new(password: passwordBytes, salt: salt, etype: krbEType);
                 return new KerberosKey(
                     key: passwordKey.GetKey().ToArray(),
                     salt: salt,
-                    etype: etype,
+                    etype: krbEType,
                     kvno: kvno);
             })];
         }
@@ -462,10 +469,11 @@ internal sealed class PrincipalStore
         }
     }
 
-    private static int GetKeySize(EncryptionType etype) => etype switch
+    /// <summary>The size in bytes of a key of the encryption type.</summary>
+    public static int GetKeySize(EncryptionType etype) => etype switch
     {
-        EncryptionType.AES128_CTS_HMAC_SHA1_96 or EncryptionType.AES128_CTS_HMAC_SHA256_128 => 16,
-        EncryptionType.AES256_CTS_HMAC_SHA1_96 or EncryptionType.AES256_CTS_HMAC_SHA384_192 => 32,
+        EncryptionType.Aes128Sha1 or EncryptionType.Aes128Sha256 => 16,
+        EncryptionType.Aes256Sha1 or EncryptionType.Aes256Sha384 => 32,
         _ => throw new ArgumentOutOfRangeException(nameof(etype)),
     };
 }

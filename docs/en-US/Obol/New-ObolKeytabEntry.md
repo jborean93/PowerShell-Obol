@@ -21,13 +21,13 @@ Creates keytab entries from a password or key.
 
 ```
 New-ObolKeytabEntry [-Name] <string> -Password <securestring> [-Realm <string>] [-Salt <string>]
- [-EncryptionType <ObolEncryptionType[]>] [-Kvno <int>] [<CommonParameters>]
+ [-EncryptionType <EncryptionType[]>] [-Kvno <int>] [<CommonParameters>]
 ```
 
 ### Key
 
 ```
-New-ObolKeytabEntry [-Name] <string> -Key <byte[]> -EncryptionType <ObolEncryptionType[]>
+New-ObolKeytabEntry [-Name] <string> -Key <byte[]> -EncryptionType <EncryptionType[]>
  [-Realm <string>] [-Kvno <int>] [<CommonParameters>]
 ```
 
@@ -115,7 +115,7 @@ With `-Key` it must be a single type that matches the size of the key.
 The supported values are `Aes128Sha1`, `Aes256Sha1`, `Aes128Sha256` and `Aes256Sha384`.
 
 ```yaml
-Type: Obol.ObolEncryptionType[]
+Type: Obol.Kerberos.EncryptionType[]
 DefaultValue: ''
 SupportsWildcards: false
 Aliases: []

@@ -20,23 +20,23 @@ Creates the settings for a principal to create with `Start-ObolKdc -Principal` o
 ### Random (Default)
 
 ```
-New-ObolPrincipalSetting [-Flag <ObolPrincipalFlag>] [-EncryptionType <ObolEncryptionType[]>]
+New-ObolPrincipalSetting [-Flag <PacUserAccountControl>] [-EncryptionType <EncryptionType[]>]
  [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [<CommonParameters>]
 ```
 
 ### Password
 
 ```
-New-ObolPrincipalSetting -Password <securestring> [-Flag <ObolPrincipalFlag>]
- [-EncryptionType <ObolEncryptionType[]>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>]
+New-ObolPrincipalSetting -Password <securestring> [-Flag <PacUserAccountControl>]
+ [-EncryptionType <EncryptionType[]>] [-Alias <string[]>] [-Rid <int>] [-Kvno <int>]
  [-Salt <string>] [<CommonParameters>]
 ```
 
 ### Key
 
 ```
-New-ObolPrincipalSetting -Key <ObolKeytabEntry[]> [-Flag <ObolPrincipalFlag>] [-Alias <string[]>]
- [-Rid <int>] [-Kvno <int>] [-Salt <string>] [<CommonParameters>]
+New-ObolPrincipalSetting -Key <ObolKeytabEntry[]> [-Flag <PacUserAccountControl>]
+ [-Alias <string[]>] [-Rid <int>] [-Kvno <int>] [-Salt <string>] [<CommonParameters>]
 ```
 
 ## ALIASES
@@ -117,7 +117,7 @@ The encryption types to create keys for, in order of preference, defaults to `Ae
 See [ENCRYPTION TYPES in about_Obol](./about_Obol.md#encryption-types) for each type and how the order is used.
 
 ```yaml
-Type: Obol.ObolEncryptionType[]
+Type: Obol.Kerberos.EncryptionType[]
 DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
@@ -149,7 +149,7 @@ Options to turn on for the principal, defaults to `None`.
 See [PRINCIPAL FLAGS in about_Obol](./about_Obol.md#principal-flags) for the values and what each one does.
 
 ```yaml
-Type: Obol.ObolPrincipalFlag
+Type: Obol.Kerberos.PacUserAccountControl
 DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
@@ -175,7 +175,7 @@ ParameterSets:
 DontShow: false
 AcceptedValues:
 - None
-- DoesNotRequirePreAuth
+- DontRequirePreAuth
 - NotDelegated
 - TrustedForDelegation
 - NoAuthDataRequired

@@ -117,7 +117,7 @@ Describe "ConvertFrom-ObolKeytab" {
 
         $actual.Name | Should-Be host/a
         $actual.Realm | Should-Be R
-        $actual.NameType | Should-Be ([Obol.ObolPrincipalNameType]::Principal)
+        $actual.NameType | Should-Be ([Obol.Kerberos.PrincipalNameType]::Principal)
         $actual.Timestamp | Should-Be ([DateTime]::UnixEpoch.AddSeconds(0x01020304).ToLocalTime())
         $actual.Timestamp.Kind | Should-Be Local
         $actual.Kvno | Should-Be 1
@@ -130,8 +130,8 @@ Describe "ConvertFrom-ObolKeytab" {
         @{ Case = 'the 8-bit kvno when the 32-bit kvno is 0'; Entry = @{ Kvno8 = 7; Kvno32 = '00000000' }; Property = 'Kvno'; Expected = 7 }
         @{ Case = 'the 32-bit kvno over the 8-bit kvno'; Entry = @{ Kvno8 = 7; Kvno32 = '00000107' }; Property = 'Kvno'; Expected = 263 }
         @{ Case = 'an entry with data after the kvno'; Entry = @{ Trailer = 'FFFFFFFF01' }; Property = 'Kvno'; Expected = 1 }
-        @{ Case = 'a name type other than KRB5_NT_PRINCIPAL'; Entry = @{ NameType = 2 }; Property = 'NameType'; Expected = [Obol.ObolPrincipalNameType]::ServiceInstance }
-        @{ Case = 'a negative MS-KILE name type'; Entry = @{ NameType = -128 }; Property = 'NameType'; Expected = [Obol.ObolPrincipalNameType]::MsPrincipal }
+        @{ Case = 'a name type other than KRB5_NT_PRINCIPAL'; Entry = @{ NameType = 2 }; Property = 'NameType'; Expected = [Obol.Kerberos.PrincipalNameType]::ServiceInstance }
+        @{ Case = 'a negative MS-KILE name type'; Entry = @{ NameType = -128 }; Property = 'NameType'; Expected = [Obol.Kerberos.PrincipalNameType]::MsPrincipal }
         @{ Case = "a component with '/'"; Entry = @{ Component = 'a/b' }; Property = 'Name'; Expected = 'host/a\/b' }
         @{ Case = 'an unsupported encryption type'; Entry = @{ EncryptionType = 23 }; Property = 'EncryptionType'; Expected = 23 }
     ) {

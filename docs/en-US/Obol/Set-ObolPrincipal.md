@@ -21,7 +21,7 @@ Changes principals of an Obol KDC.
 
 ```
 Set-ObolPrincipal [-Principal] <ObolPrincipal[]> [-Password <securestring>] [-NewRandomKey]
- [-EncryptionType <ObolEncryptionType[]>] [-Flag <ObolPrincipalFlag>] [-Alias <string[]>]
+ [-EncryptionType <EncryptionType[]>] [-Flag <PacUserAccountControl>] [-Alias <string[]>]
  [-Key <ObolKeytabEntry[]>] [-Kvno <int>] [-Salt <string>] [-PassThru] [-WhatIf] [-Confirm]
  [<CommonParameters>]
 ```
@@ -30,7 +30,7 @@ Set-ObolPrincipal [-Principal] <ObolPrincipal[]> [-Password <securestring>] [-Ne
 
 ```
 Set-ObolPrincipal [-Name] <string[]> -Kdc <ObolKdc> [-Password <securestring>] [-NewRandomKey]
- [-EncryptionType <ObolEncryptionType[]>] [-Flag <ObolPrincipalFlag>] [-Alias <string[]>]
+ [-EncryptionType <EncryptionType[]>] [-Flag <PacUserAccountControl>] [-Alias <string[]>]
  [-Key <ObolKeytabEntry[]>] [-Kvno <int>] [-Salt <string>] [-PassThru] [-WhatIf] [-Confirm]
  [<CommonParameters>]
 ```
@@ -81,7 +81,7 @@ Removes every key but the AES128 key, tickets for the service and their session 
 ### Example 4: Allow a user to get a ticket without pre-authentication
 
 ```powershell
-Set-ObolPrincipal $user -Flag DoesNotRequirePreAuth
+Set-ObolPrincipal $user -Flag DontRequirePreAuth
 ```
 
 The KDC issues a ticket to the user without pre-authentication until the flags are set back to `None`.
@@ -186,7 +186,7 @@ The kept keys do not change and the key version number stays the same.
 With `-Password` or `-NewRandomKey` the new keys are created for these types.
 
 ```yaml
-Type: Obol.ObolEncryptionType[]
+Type: Obol.Kerberos.EncryptionType[]
 DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
@@ -210,10 +210,10 @@ HelpMessage: ''
 
 The options of the principal, see [PRINCIPAL FLAGS in about_Obol](./about_Obol.md#principal-flags) for the values and what each one does.
 The flags replace the existing flags, use `None` to turn every option off.
-To change one flag combine it with the current flags, such as `-Flag ($principal.Flag -bor 'DoesNotRequirePreAuth')`.
+To change one flag combine it with the current flags, such as `-Flag ($principal.Flag -bor 'DontRequirePreAuth')`.
 
 ```yaml
-Type: Obol.ObolPrincipalFlag
+Type: Obol.Kerberos.PacUserAccountControl
 DefaultValue: ''
 SupportsWildcards: false
 Aliases: []
@@ -227,7 +227,7 @@ ParameterSets:
 DontShow: false
 AcceptedValues:
 - None
-- DoesNotRequirePreAuth
+- DontRequirePreAuth
 - NotDelegated
 - TrustedForDelegation
 - NoAuthDataRequired

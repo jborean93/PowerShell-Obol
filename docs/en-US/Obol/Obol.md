@@ -110,6 +110,10 @@ Starts an Obol Kerberos KDC.
 
 Stops an Obol KDC.
 
+### [Trace-ObolKdc](Trace-ObolKdc.md)
+
+Outputs the requests Obol KDCs answer, as they happen or the ones made while a scriptblock runs.
+
 ### [Use-ObolKrb5Environment](Use-ObolKrb5Environment.md)
 
 Runs a scriptblock with an Obol KDC and the krb5 environment variables pointing at it.

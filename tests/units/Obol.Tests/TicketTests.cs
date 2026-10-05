@@ -179,7 +179,7 @@ public class TicketTests
         using TestKdc kdc = new();
         ObolPrincipal user = kdc.AddUser("user");
 
-        kdc.Store.Update(user, flags: ObolPrincipalFlag.DoesNotRequirePreAuth);
+        kdc.Store.Update(user, flags: Kerberos.PacUserAccountControl.DontRequirePreAuth);
 
         using KerberosClient client = await Authenticate(kdc,
             AuthenticationOptions.IncludePacRequest | AuthenticationOptions.Renewable);

@@ -3,23 +3,18 @@ using System.Buffers.Binary;
 using Kerberos.NET.Crypto;
 using Kerberos.NET.Entities;
 using Kerberos.NET.Entities.Pac;
+using Obol.Kerberos;
+using EncryptionType = Obol.Kerberos.EncryptionType;
+using KrbPacLogonInfo = Kerberos.NET.Entities.Pac.PacLogonInfo;
 
 namespace Obol.Protocol;
 
 /// <summary>A principal found for a request, with its state at the time of the request.</summary>
 internal sealed class KdcPrincipal
 {
-    private const SidAttributes GroupAttributes = SidAttributes.SE_GROUP_MANDATORY
-        | SidAttributes.SE_GROUP_ENABLED_BY_DEFAULT
-        | SidAttributes.SE_GROUP_ENABLED;
-
-    // The PAC UserAccountControl uses the MS-SAMR 2.2.1.12 USER_* codes, not the LDAP ADS_UF_* values of the
-    // Kerberos.NET enum.
-    private const uint UserNormalAccount = 0x00000010;
-    private const uint UserTrustedForDelegation = 0x00002000;
-    private const uint UserNotDelegated = 0x00004000;
-    private const uint UserDontRequirePreauth = 0x00010000;
-    private const uint UserNoAuthDataRequired = 0x00080000;
+    private const PacGroupAttribute GroupAttributes = PacGroupAttribute.Mandatory
+        | PacGroupAttribute.EnabledByDefault
+        | PacGroupAttribute.Enabled;
 
     public KdcPrincipal(ObolPrincipal principal)
     {
@@ -38,35 +33,29 @@ internal sealed class KdcPrincipal
 
     public KerberosKey? GetKey(EncryptionType etype) => State.GetKey(etype);
 
-    // The MS-KILE 2.2.7 bit flags of the encryption types the store can create keys for. The Kerberos.NET
-    // SupportedEncryptionTypes enum gives the SHA-2 types the wrong values (0x20 is AES256-CTS-HMAC-SHA1-96-SK).
-    private const uint SupportedAes128Sha1 = 0x00000008;
-    private const uint SupportedAes256Sha1 = 0x00000010;
-    private const uint SupportedAes128Sha256 = 0x00000040;
-    private const uint SupportedAes256Sha384 = 0x00000080;
-
     /// <summary>
     /// The encryption types of the principal's keys as the 32-bit little endian PA-SUPPORTED-ENCTYPES value.
     /// </summary>
     public ReadOnlyMemory<byte> EncodeSupportedEncryptionTypes()
     {
-        uint types = 0;
+        SupportedEncryptionType types = SupportedEncryptionType.None;
         foreach (KerberosKey key in State.Keys)
         {
-            types |= key.EncryptionType switch
+            EncryptionType etype = key.EncryptionType.ToObol();
+            types |= etype switch
             {
-                EncryptionType.AES128_CTS_HMAC_SHA1_96 => SupportedAes128Sha1,
-                EncryptionType.AES256_CTS_HMAC_SHA1_96 => SupportedAes256Sha1,
-                EncryptionType.AES128_CTS_HMAC_SHA256_128 => SupportedAes128Sha256,
-                EncryptionType.AES256_CTS_HMAC_SHA384_192 => SupportedAes256Sha384,
+                EncryptionType.Aes128Sha1 => SupportedEncryptionType.Aes128Sha1,
+                EncryptionType.Aes256Sha1 => SupportedEncryptionType.Aes256Sha1,
+                EncryptionType.Aes128Sha256 => SupportedEncryptionType.Aes128Sha256,
+                EncryptionType.Aes256Sha384 => SupportedEncryptionType.Aes256Sha384,
                 // The store only creates the supported types, a new one must be mapped here.
-                _ => throw new ArgumentOutOfRangeException(nameof(key.EncryptionType), key.EncryptionType,
+                _ => throw new ArgumentOutOfRangeException(nameof(key.EncryptionType), etype,
                     "The encryption type has no PA-SUPPORTED-ENCTYPES value"),
             };
         }
 
         byte[] value = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(value, types);
+        BinaryPrimitives.WriteUInt32LittleEndian(value, (uint)types);
         return value;
     }
 
@@ -78,27 +67,13 @@ internal sealed class KdcPrincipal
     {
         PrincipalStore store = Principal.Store;
         SecurityIdentifier domainSid = store.DomainSid;
-        uint uac = UserNormalAccount;
-        if (State.Flags.HasFlag(ObolPrincipalFlag.DoesNotRequirePreAuth))
-        {
-            uac |= UserDontRequirePreauth;
-        }
-        if (State.Flags.HasFlag(ObolPrincipalFlag.NotDelegated))
-        {
-            uac |= UserNotDelegated;
-        }
-        if (State.Flags.HasFlag(ObolPrincipalFlag.TrustedForDelegation))
-        {
-            uac |= UserTrustedForDelegation;
-        }
-        if (State.Flags.HasFlag(ObolPrincipalFlag.NoAuthDataRequired))
-        {
-            uac |= UserNoAuthDataRequired;
-        }
+        // The flags of a principal are the PAC values, only the supported bits are set on a principal.
+        PacUserAccountControl uac = PacUserAccountControl.NormalAccount
+            | (State.Flags & PrincipalStore.SupportedAccountControl);
 
         return new PrivilegedAttributeCertificate
         {
-            LogonInfo = new PacLogonInfo
+            LogonInfo = new KrbPacLogonInfo
             {
                 DomainName = GetNetBiosName(store.Realm),
                 UserName = Principal.Name,
@@ -111,11 +86,11 @@ internal sealed class KdcPrincipal
                     new GroupMembership
                     {
                         RelativeId = PrincipalStore.DomainUsersRid,
-                        Attributes = GroupAttributes,
+                        Attributes = GroupAttributes.ToKerberosNet(),
                     },
                 ],
                 LogonTime = authTime,
-                UserAccountControl = (UserAccountControlFlags)uac,
+                UserAccountControl = uac.ToKerberosNet(),
             },
         };
     }

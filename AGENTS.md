@@ -166,14 +166,21 @@ The namespace matches the folder under `src/Obol/`:
 
 | Namespace | Folder | Contents |
 | --- | --- | --- |
-| `Obol` | `src/Obol/` | The public types PowerShell sees (`ObolKdc`, `ObolPrincipal`, `ObolPrincipalSetting`, the enums), argument completers and other PowerShell glue, and the hosting code such as the `KdcListener` sockets and per-runspace state. |
+| `Obol` | `src/Obol/` | The public types PowerShell sees (`ObolKdc`, `ObolPrincipal`, `ObolPrincipalSetting`) and the enums for Obol's own concepts (`ObolKdcTransport`, `ObolSaltType`, the SSPI flags, ...), argument completers and other PowerShell glue, and the hosting code such as the `KdcListener` sockets and per-runspace state. |
 | `Obol.Commands` | `src/Obol/Commands/` | The cmdlets and the helpers shared between them. |
 | `Obol.Protocol` | `src/Obol/Protocol/` | The Kerberos logic: processing requests into replies, ticket policy, principal names, and the principals and their keys. |
+| `Obol.Kerberos` | `src/Obol/Kerberos/` | The public model of the Kerberos messages a traced exchange holds (`KdcRequest`, `Ticket`, `Pac`, ...) and every Kerberos constant as an enum with the registered numbers as values (`EncryptionType`, `ChecksumType`, `ErrorCode`, `TicketFlag`, `PrincipalNameType`, ...). Plain names without the `Obol` prefix, built from Kerberos.NET objects by `Obol.Protocol`, and exposing only BCL and `Obol` types. A cmdlet parameter of one of these enums that only accepts some members restricts them with `ValidateSet`, see `SupportedEncryptionTypeValues`. |
 
-`Obol.Protocol` is the only namespace that uses Kerberos.NET. Code in `Obol`
-and `Obol.Commands` must not reference Kerberos.NET types, it calls into
+`Obol.Protocol` is the only namespace that uses Kerberos.NET. Code in `Obol`,
+`Obol.Commands` and `Obol.Kerberos` must not reference Kerberos.NET types, it calls into
 `Obol.Protocol` with built-in or `Obol` types instead, such as
-`ObolEncryptionType` rather than the Kerberos.NET `EncryptionType`. Every type
+`Obol.Kerberos.EncryptionType` rather than the Kerberos.NET `EncryptionType`.
+Inside `Obol.Protocol` the Kerberos constants (encryption, checksum, message,
+pre-authentication and authorization data types, error codes, ticket flags,
+KDC options, key usage numbers, PAC flags, name types) are the `Obol.Kerberos`
+enums, never the Kerberos.NET ones. Convert with the `ToKerberosNet()` and `ToObol()`
+extensions in `KerberosNetExtensions.cs` exactly where a Kerberos.NET entity or
+key is built or read, so every boundary crossing is greppable. Every type
 in `Obol.Protocol` must be `internal`, a public one would put Kerberos.NET on
 the public type surface (see below). Do not create other namespaces, such as
 one per kind of type, without a reason like this.

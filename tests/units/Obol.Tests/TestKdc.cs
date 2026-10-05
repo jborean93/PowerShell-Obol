@@ -42,9 +42,12 @@ internal sealed class TestKdc : IDisposable
     }
 
     /// <summary>Starts answering requests, for a KDC created with start set to false.</summary>
-    public void Start() => _listener.Start(e => Fault = e);
+    public void Start() => _listener.Start(e => Fault = e, Exchanges.Enqueue);
 
     public PrincipalStore Store { get; }
+
+    /// <summary>The requests the listener answered, in the order they were processed.</summary>
+    public ConcurrentQueue<KdcExchange> Exchanges { get; } = new();
 
     public Exception? Fault { get; private set; }
 
@@ -53,17 +56,17 @@ internal sealed class TestKdc : IDisposable
     public ObolPrincipal AddUser(
         string name,
         string password = Password,
-        ObolPrincipalFlag flags = ObolPrincipalFlag.None,
+        Kerberos.PacUserAccountControl flags = Kerberos.PacUserAccountControl.None,
         EncryptionType[]? encryptionTypes = null)
         => Store.Create(name.Split('/'), ToSecureString(password), flags,
             ToObolEncryptionTypes(encryptionTypes));
 
     public ObolPrincipal AddService(string name, EncryptionType[]? encryptionTypes = null, string[]? aliases = null)
-        => Store.Create(name.Split('/'), password: null, flags: ObolPrincipalFlag.None,
+        => Store.Create(name.Split('/'), password: null, flags: Kerberos.PacUserAccountControl.None,
             ToObolEncryptionTypes(encryptionTypes), aliases?.Select(a => a.Split('/')).ToArray());
 
-    private static ObolEncryptionType[]? ToObolEncryptionTypes(EncryptionType[]? types)
-        => types?.Select(t => (ObolEncryptionType)t).ToArray();
+    private static Kerberos.EncryptionType[]? ToObolEncryptionTypes(EncryptionType[]? types)
+        => types?.Select(t => (Kerberos.EncryptionType)t).ToArray();
 
     public KerberosClient CreateClient()
     {
@@ -109,7 +112,7 @@ internal sealed class TestKdc : IDisposable
     /// <summary>Decrypts a service ticket with the service's key for its encryption type.</summary>
     public static KrbEncTicketPart DecryptTicket(KrbTicket ticket, ObolPrincipal service)
         => ticket.EncryptedPart.Decrypt(
-            service.State.GetKey(ticket.EncryptedPart.EType)!,
+            service.State.GetKey(ticket.EncryptedPart.EType.ToObol())!,
             KeyUsage.Ticket,
             b => KrbEncTicketPart.DecodeApplication(b));
 

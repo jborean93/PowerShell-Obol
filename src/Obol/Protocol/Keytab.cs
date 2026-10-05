@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using Kerberos.NET.Crypto;
+using Obol.Kerberos;
+using EncryptionType = Obol.Kerberos.EncryptionType;
 
 namespace Obol.Protocol;
 
@@ -42,10 +44,10 @@ internal static class Keytab
                 entries.Add(new ObolKeytabEntry(
                     principal.Realm,
                     components,
-                    ObolPrincipalNameType.Principal,
+                    PrincipalNameType.Principal,
                     timestamp,
                     state.Kvno,
-                    (ObolEncryptionType)key.EncryptionType,
+                    key.EncryptionType.ToObol(),
                     key.GetKey().ToArray()));
             }
         }
@@ -111,7 +113,7 @@ internal static class Keytab
             }
 
             // Stored unsigned, the MS-KILE types are negative so the bits are kept as an int.
-            ObolPrincipalNameType nameType = (ObolPrincipalNameType)unchecked((int)ReadUInt32(entry, ref offset));
+            PrincipalNameType nameType = (PrincipalNameType)unchecked((int)ReadUInt32(entry, ref offset));
             uint timestamp = ReadUInt32(entry, ref offset);
             int kvno = entry[offset++];
             int etype = ReadUInt16(entry, ref offset);
@@ -144,7 +146,7 @@ internal static class Keytab
                 nameType,
                 DateTime.UnixEpoch.AddSeconds(timestamp),
                 kvno,
-                (ObolEncryptionType)etype,
+                (EncryptionType)etype,
                 key);
         }
         catch (ArgumentOutOfRangeException)
