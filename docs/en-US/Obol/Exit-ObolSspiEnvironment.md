@@ -114,6 +114,9 @@ This cmdlet supports the common parameters: -Debug, -ErrorAction, -ErrorVariable
 
 Exiting does not stop the KDCs, use `Stop-ObolKdc` for that.
 
+Exiting does not remove the tickets Windows got from the KDCs or clear the caches outside the Kerberos SSP, such as Netlogon's domain controller cache.
+See [CLEARING CACHED STATE in about_ObolSspi](./about_ObolSspi.md#clearing-cached-state) for how to clear them between tests.
+
 ## RELATED LINKS
 
 - [Enter-ObolSspiEnvironment](./Enter-ObolSspiEnvironment.md)
