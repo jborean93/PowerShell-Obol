@@ -500,6 +500,25 @@ Describe "Enter-ObolSspiEnvironment" -Skip:(-not $IsWindows) {
             (Get-NrptRule -Namespace .example.test).GenericDNSServers | Should-Be '127.0.0.1;127.0.0.2'
         }
 
+        It "Fails for KDCs that share an address" {
+            # TCP and UDP port 88 are separate ports, so two KDCs can listen on the same address.
+            $tcp = Start-ObolKdc EXAMPLE.TEST -Address 127.0.0.2 -Port 88 -Transport Tcp
+            $udp = Start-ObolKdc OTHER.TEST -Address 127.0.0.2 -Port 88 -Transport Udp
+
+            $err = { Enter-ObolSspiEnvironment $tcp, $udp -Scope DcLocator } |
+                Should-Throw -FullyQualifiedErrorId 'SspiKdcAddressShared,Obol.Commands.EnterObolSspiEnvironment'
+
+            $err.Exception.Message | Should-BeLikeString '*use the same address 127.0.0.2, scope DcLocator needs each KDC on its own address*'
+            Get-NrptRule -Namespace .example.test | Should-BeNull
+            Test-PortFree 53 -Udp | Should-BeTrue
+        }
+
+        It "Accepts the same KDC given twice" {
+            Enter-ObolSspiEnvironment $kdc, $kdc -Scope DcLocator
+
+            (Get-NrptRule -Namespace .example.test).GenericDNSServers | Should-Be 127.0.0.1
+        }
+
         It "Fails for a realm that is not a DNS name" {
             $single = Start-ObolKdc EXAMPLE -Address 127.0.0.2 -Port 88
 

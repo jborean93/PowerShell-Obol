@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -54,40 +55,67 @@ internal sealed class DcLocatorDns
     /// <returns>The reply, or null if the request is too malformed to reply to.</returns>
     public byte[]? Process(ReadOnlySpan<byte> request)
     {
+        DcLocatorDnsExchange exchange = new() { RequestBytes = request.ToArray() };
+        Process(exchange);
+        return exchange.ReplyBytes;
+    }
+
+    /// <summary>
+    /// Builds the reply to the query in <see cref="DcLocatorExchange.RequestBytes"/> and records what was asked and
+    /// answered. <see cref="DcLocatorExchange.ReplyBytes"/> is left null if the request is too malformed to reply to.
+    /// </summary>
+    public void Process(DcLocatorDnsExchange exchange)
+    {
+        ReadOnlySpan<byte> request = exchange.RequestBytes;
         if (request.Length < HeaderLength)
         {
-            return null;
+            return;
         }
 
         ushort id = BinaryPrimitives.ReadUInt16BigEndian(request);
         ushort flags = BinaryPrimitives.ReadUInt16BigEndian(request[2..]);
         ushort questions = BinaryPrimitives.ReadUInt16BigEndian(request[4..]);
+        exchange.Id = id;
         if ((flags & FlagResponse) != 0)
         {
-            return null;
+            return;
         }
 
         if ((flags & OpcodeMask) != 0)
         {
-            return BuildError(id, flags, RcodeNotImplemented);
+            SetReply(exchange, BuildError(id, flags, RcodeNotImplemented), RcodeNotImplemented);
+            return;
         }
         if (questions != 1 || !TryReadQuestion(request, out string name, out ushort type, out ushort qclass,
             out int questionEnd))
         {
-            return BuildError(id, flags, RcodeFormatError);
+            SetReply(exchange, BuildError(id, flags, RcodeFormatError), RcodeFormatError);
+            return;
         }
+        exchange.Name = name;
+        exchange.Type = (ObolDnsRecordType)type;
 
         ReadOnlySpan<byte> question = request[HeaderLength..questionEnd];
         DcLocatorDomain? domain = FindDomain(name);
         if (domain is null || qclass != ClassIn)
         {
-            return BuildReply(id, flags, RcodeRefused, question, [], []);
+            SetReply(exchange, BuildReply(id, flags, RcodeRefused, question, [], []), RcodeRefused);
+            return;
         }
 
         List<Record> answers = [];
         List<Record> additional = [];
         bool exists = Answer(domain, name, type, answers, additional);
-        return BuildReply(id, flags, exists ? (ushort)0 : RcodeNameError, question, answers, additional);
+        ushort rcode = exists ? (ushort)0 : RcodeNameError;
+        SetReply(exchange, BuildReply(id, flags, rcode, question, answers, additional), rcode);
+        exchange.Answers.AddRange(answers.Select(r => r.ToObol(name)));
+        exchange.Additional.AddRange(additional.Select(r => r.ToObol(name)));
+    }
+
+    private static void SetReply(DcLocatorDnsExchange exchange, byte[] reply, ushort rcode)
+    {
+        exchange.ReplyBytes = reply;
+        exchange.ResponseCode = (ObolDnsResponseCode)rcode;
     }
 
     /// <summary>Finds the answers for a name in a realm.</summary>
@@ -251,14 +279,16 @@ internal sealed class DcLocatorDns
     }
 
     /// <summary>A resource record, the owner is the question name when <see cref="Owner"/> is null.</summary>
-    private sealed record Record(string? Owner, ushort Type, byte[] Data)
+    /// <remarks>The address, port and target are the value in the data, kept for <see cref="ToObol"/>.</remarks>
+    private sealed record Record(string? Owner, ushort Type, byte[] Data, IPAddress? IPAddress = null,
+        ushort? Port = null, string? Target = null)
     {
         /// <summary>A pointer to the question name, right after the header.</summary>
         private const ushort QuestionNamePointer = 0xC000 | HeaderLength;
 
         public static Record Address(string? owner, IPAddress address)
             => new(owner, address.AddressFamily == AddressFamily.InterNetworkV6 ? TypeAaaa : TypeA,
-                address.GetAddressBytes());
+                address.GetAddressBytes(), IPAddress: address);
 
         public static Record Srv(ushort port, string target)
         {
@@ -267,8 +297,12 @@ internal sealed class DcLocatorDns
             WriteUInt16(data, 100);
             WriteUInt16(data, port);
             WriteName(data, target);
-            return new(null, TypeSrv, [.. data]);
+            return new(null, TypeSrv, [.. data], Port: port, Target: target);
         }
+
+        /// <summary>The public view of the record, the owner is <paramref name="questionName"/> if not set.</summary>
+        public ObolDnsRecord ToObol(string questionName)
+            => new(Owner ?? questionName, (ObolDnsRecordType)Type, Ttl, IPAddress, Port, Target);
 
         public void Write(List<byte> buffer)
         {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -43,8 +44,15 @@ internal sealed class DcLocatorServer : IDisposable
     }
 
     /// <summary>Binds the DNS and CLDAP sockets for the domains and starts answering.</summary>
+    /// <param name="domains">The domains to answer for.</param>
+    /// <param name="onExchange">
+    /// Called with each request and its reply before the reply is sent, on the thread that processed the request. An
+    /// exception it throws is ignored.
+    /// </param>
     /// <exception cref="SspiKdcException">A port could not be bound, such as when a DNS server uses it.</exception>
-    public static DcLocatorServer Start(IReadOnlyList<DcLocatorDomain> domains)
+    public static DcLocatorServer Start(
+        IReadOnlyList<DcLocatorDomain> domains,
+        Action<DcLocatorExchange>? onExchange = null)
     {
         DcLocatorDns dns = new(domains);
         DcLocatorLdap ldap = new(domains);
@@ -61,8 +69,8 @@ internal sealed class DcLocatorServer : IDisposable
 
             foreach ((Socket dnsSocket, Socket ldapSocket, IPAddress address) in sockets)
             {
-                server.Run(dnsSocket, (request, _) => dns.Process(request.Span));
-                server.Run(ldapSocket, (request, _) => ldap.Process(request, address));
+                server.Run<DcLocatorDnsExchange>(dnsSocket, address, dns.Process, onExchange);
+                server.Run<DcLocatorLdapExchange>(ldapSocket, address, ldap.Process, onExchange);
             }
         }
         catch
@@ -101,13 +109,19 @@ internal sealed class DcLocatorServer : IDisposable
         return socket;
     }
 
-    private void Run(Socket socket, Func<ReadOnlyMemory<byte>, IPEndPoint, byte[]?> process)
-        => _loops.Add(Task.Run(() => ReceiveLoopAsync(socket, process, _cts.Token)));
-
-    private static async Task ReceiveLoopAsync(
+    private void Run<T>(
         Socket socket,
-        Func<ReadOnlyMemory<byte>, IPEndPoint, byte[]?> process,
-        CancellationToken cancelToken)
+        IPAddress address,
+        Action<T> process,
+        Action<DcLocatorExchange>? onExchange) where T : DcLocatorExchange, new()
+        => _loops.Add(Task.Run(() => ReceiveLoopAsync(socket, address, process, onExchange, _cts.Token)));
+
+    private static async Task ReceiveLoopAsync<T>(
+        Socket socket,
+        IPAddress address,
+        Action<T> process,
+        Action<DcLocatorExchange>? onExchange,
+        CancellationToken cancelToken) where T : DcLocatorExchange, new()
     {
         byte[] buffer = new byte[MaxDatagramLength];
         EndPoint any = new IPEndPoint(
@@ -120,18 +134,36 @@ internal sealed class DcLocatorServer : IDisposable
                     .ConfigureAwait(false);
                 IPEndPoint remote = (IPEndPoint)result.RemoteEndPoint;
 
-                byte[]? reply;
+                T exchange = new()
+                {
+                    Time = DateTime.Now,
+                    ClientAddress = remote,
+                    LocalAddress = address,
+                    RequestBytes = buffer.AsSpan(0, result.ReceivedBytes).ToArray(),
+                };
+                long start = Stopwatch.GetTimestamp();
                 try
                 {
-                    reply = process(buffer.AsMemory(0, result.ReceivedBytes), remote);
+                    process(exchange);
+                }
+                catch (Exception e)
+                {
+                    // A request the parsers did not expect is dropped, the client retries or gives up.
+                    exchange.Exception = e;
+                    exchange.ReplyBytes = null;
+                }
+                exchange.Duration = Stopwatch.GetElapsedTime(start);
+
+                try
+                {
+                    onExchange?.Invoke(exchange);
                 }
                 catch (Exception)
                 {
-                    // A request the parsers did not expect is dropped, the client retries or gives up.
-                    reply = null;
+                    // The callback is not the server's concern, the client still gets its reply.
                 }
 
-                if (reply is not null)
+                if (exchange.ReplyBytes is byte[] reply)
                 {
                     await socket.SendToAsync(reply, remote, cancelToken).ConfigureAwait(false);
                 }

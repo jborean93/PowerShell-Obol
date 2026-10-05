@@ -85,6 +85,30 @@ Describe "Trace-ObolKdc" {
             $actual.Key[1].EncryptionType | Should-Be ($kdc | Get-ObolPrincipal krbtgt/*).EncryptionType[0]
         }
 
+        It "Outputs the KDC events with -Include <Include>" -TestCases @(
+            @{ Include = 'All'; Count = 1 }
+            @{ Include = 'Kdc'; Count = 1 }
+            @{ Include = 'Kdc, Dns'; Count = 1 }
+            @{ Include = 'Dns, Ldap'; Count = 0 }
+        ) {
+            param ($Include, $Count)
+
+            $actual = Trace-ObolKdc -Kdc $kdc -Include $Include {
+                $null = Invoke-KdcRequest -Port $kdc.Port -Request $request
+            }
+
+            @($actual).Count | Should-Be $Count
+        }
+
+        It "Fails for -Include 0 without running the scriptblock" {
+            $script:ran = $false
+            {
+                Trace-ObolKdc -Kdc $kdc -Include 0 { $script:ran = $true }
+            } | Should-Throw -FullyQualifiedErrorId 'ParameterArgumentValidationError,Obol.Commands.TraceObolKdc'
+
+            $script:ran | Should-BeFalse
+        }
+
         It "Outputs the event of a rejected request" {
             $actual = Trace-ObolKdc -Kdc $kdc {
                 $null = Invoke-KdcRequest -Port $kdc.Port -Request (New-AsReq EXAMPLE.TEST unknown) -Udp
@@ -406,6 +430,14 @@ Describe "Trace-ObolKdc" {
             finally {
                 Unregister-Event -SourceIdentifier ObolTest
             }
+        }
+
+        It "Has the DC locator events" {
+            # Only raised in a DcLocator SSPI environment, see Sspi.Tests.ps1.
+            $kdc.GetType().GetEvent('DnsRequestProcessed').EventHandlerType |
+                Should-Be ([EventHandler[Obol.ObolDnsEvent]])
+            $kdc.GetType().GetEvent('LdapRequestProcessed').EventHandlerType |
+                Should-Be ([EventHandler[Obol.ObolLdapEvent]])
         }
 
         It "Ignores a failing handler and still replies" {

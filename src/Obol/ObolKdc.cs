@@ -35,6 +35,22 @@ public sealed class ObolKdc : IDisposable
     /// </remarks>
     public event EventHandler<ObolKdcEvent>? RequestProcessed;
 
+    /// <summary>
+    /// Raised for each DNS query the DC locator DNS server of a <c>DcLocator</c> SSPI environment answered for the
+    /// KDC, before the reply is sent.
+    /// </summary>
+    /// <remarks>Raised like <see cref="RequestProcessed"/> for the queries sent to the address of the KDC.
+    /// </remarks>
+    public event EventHandler<ObolDnsEvent>? DnsRequestProcessed;
+
+    /// <summary>
+    /// Raised for each LDAP ping the DC locator CLDAP responder of a <c>DcLocator</c> SSPI environment answered for
+    /// the KDC, before the reply is sent.
+    /// </summary>
+    /// <remarks>Raised like <see cref="RequestProcessed"/> for the pings sent to the address of the KDC.
+    /// </remarks>
+    public event EventHandler<ObolLdapEvent>? LdapRequestProcessed;
+
     /// <summary>Raised once when the KDC stops answering requests, by Dispose or a fault.</summary>
     internal event EventHandler? Stopped;
 
@@ -167,21 +183,40 @@ public sealed class ObolKdc : IDisposable
 
     public override string ToString() => $"{Realm} ({Endpoint})";
 
-    /// <summary>Raises <see cref="RequestProcessed"/>, each handler on its own so one failing does not skip the
-    /// others.</summary>
     private void OnExchange(KdcExchange exchange)
+        => Raise(RequestProcessed, () => new ObolKdcEvent(this, exchange));
+
+    /// <summary>Raises <see cref="DnsRequestProcessed"/> or <see cref="LdapRequestProcessed"/> for a request the DC
+    /// locator listeners answered for the KDC.</summary>
+    internal void OnLocatorExchange(DcLocatorExchange exchange)
     {
-        if (RequestProcessed is not EventHandler<ObolKdcEvent> handlers)
+        if (exchange is DcLocatorDnsExchange dns)
+        {
+            Raise(DnsRequestProcessed, () => new ObolDnsEvent(this, dns));
+        }
+        else if (exchange is DcLocatorLdapExchange ldap)
+        {
+            Raise(LdapRequestProcessed, () => new ObolLdapEvent(this, ldap));
+        }
+    }
+
+    /// <summary>
+    /// Raises an event, each handler on its own so one failing does not skip the others. The event object is only
+    /// built if there is a handler.
+    /// </summary>
+    private void Raise<T>(EventHandler<T>? handlers, Func<T> createEvent) where T : ObolTraceEvent
+    {
+        if (handlers is null)
         {
             return;
         }
 
-        ObolKdcEvent kdcEvent = new(this, exchange);
+        T traceEvent = createEvent();
         foreach (Delegate handler in handlers.GetInvocationList())
         {
             try
             {
-                ((EventHandler<ObolKdcEvent>)handler)(this, kdcEvent);
+                ((EventHandler<T>)handler)(this, traceEvent);
             }
             catch (Exception)
             {

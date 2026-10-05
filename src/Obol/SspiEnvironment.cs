@@ -61,7 +61,7 @@ internal sealed class SspiEnvironment
 
     /// <summary>Registers each KDC with the SSP and makes it the entered environment.</summary>
     /// <param name="scope">How to register the KDCs, see <see cref="ObolSspiKdcScope"/>.</param>
-    /// <param name="kdcs">The realm, the address clients use and the transports of each KDC.</param>
+    /// <param name="kdcs">Each KDC with its realm, the address clients use and its transports.</param>
     /// <param name="runspace">Exits the environment when this runspace closes.</param>
     /// <returns>The entered environment, or null if one is already entered and nothing is changed.</returns>
     /// <exception cref="SspiKdcException">A KDC could not be registered, the ones added are removed.</exception>
@@ -70,7 +70,7 @@ internal sealed class SspiEnvironment
     /// </exception>
     public static SspiEnvironment? TryEnter(
         ObolSspiKdcScope scope,
-        IReadOnlyList<(string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs,
+        IReadOnlyList<(ObolKdc Kdc, string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs,
         Runspace? runspace)
     {
         lock (s_lock)
@@ -126,14 +126,14 @@ internal sealed class SspiEnvironment
 
     private static SspiMachineSetup? Register(
         ObolSspiKdcScope scope,
-        IReadOnlyList<(string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs)
+        IReadOnlyList<(ObolKdc Kdc, string Realm, IPAddress Address, ObolKdcTransport Transport)> kdcs)
     {
         SspiMachineSetup? setup = null;
         try
         {
             if (scope == ObolSspiKdcScope.Thread)
             {
-                foreach ((string realm, IPAddress address, _) in kdcs)
+                foreach ((_, string realm, IPAddress address, _) in kdcs)
                 {
                     SspiKdc.PinKdc(realm, address.ToString(), (int)ObolSspiDcFlags.None);
                     SspiPinRegistry.Add(ObolSspiKdc.ForThread(realm, address.ToString(), ObolSspiDcFlags.None));
@@ -144,7 +144,7 @@ internal sealed class SspiEnvironment
                 // Adding a binding for a realm replaces any existing one.
                 using (SystemImpersonation.Acquire())
                 {
-                    foreach ((string realm, IPAddress address, _) in kdcs)
+                    foreach ((_, string realm, IPAddress address, _) in kdcs)
                     {
                         SspiKdc.AddBinding(realm, address.ToString(), (int)ObolSspiKdcAddressType.Inet,
                             (int)ObolSspiDcFlags.None);
