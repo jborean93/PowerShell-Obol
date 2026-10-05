@@ -687,11 +687,19 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
         $password = ConvertTo-SecureString 'Password123!' -AsPlainText -Force
         $plainPassword = 'Password123!'
 
-        # Authenticates user@$Realm to HTTP/web.$Realm with NegotiateAuthentication requiring mutual auth, the keytab
-        # acceptor returns the AP-REP the client checks. .NET caches the credential handle of a NetworkCredential, and
-        # the SSP the tickets got with it, so each test uses its own realm to not get the tickets of an earlier KDC.
+        # The SSP keeps the tickets of a supplied credential after its handle is released, and .NET caches the
+        # credential handle of a NetworkCredential, so a later authentication as the same user uses those tickets
+        # without contacting the KDC. A test that needs the KDC to see the exchange uses a user no other test, or an
+        # earlier run of the same test in this process, has used.
+        Function New-UniqueUserName {
+            "user$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+        }
+
+        # Authenticates $User@$Realm to HTTP/web.$Realm with NegotiateAuthentication requiring mutual auth, the keytab
+        # acceptor returns the AP-REP the client checks.
         Function Invoke-NegotiateExchange {
             param (
+                [string]$User,
                 [string]$Realm,
                 [byte[]]$Keytab,
                 [Microsoft.Win32.SafeHandles.SafeAccessTokenHandle]$AcceptorToken
@@ -700,7 +708,7 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
             $service = "HTTP/web.$($Realm.ToLowerInvariant())"
             $client = [NegotiateAuthentication]::new([NegotiateAuthenticationClientOptions]@{
                     Package = 'Kerberos'
-                    Credential = [NetworkCredential]::new("user@$Realm", $plainPassword)
+                    Credential = [NetworkCredential]::new("$User@$Realm", $plainPassword)
                     TargetName = $service
                     RequireMutualAuthentication = $true
                 })
@@ -818,55 +826,79 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
         }
 
         It "Traces the AS and TGS exchanges of an SSPI client" {
+            $user = New-UniqueUserName
+
+            $upn = "$user@EXAMPLE.TEST"
             $actual = Use-ObolSspiEnvironment EXAMPLE.TEST -Principal @{
-                user = $password
+                $user = $password
                 'HTTP/web.example.test' = $null
             } {
                 param ($kdc)
 
                 # The pin is per thread and the traced scriptblock runs on this thread.
                 Trace-ObolKdc -Kdc $kdc {
-                    $null = [ObolTests.Sspi]::GetToken('user@EXAMPLE.TEST', $plainPassword, 'HTTP/web.example.test')
+                    $null = [ObolTests.Sspi]::GetToken($upn, $plainPassword, 'HTTP/web.example.test')
                 }
             }
 
-            # The SSP may ask without pre-authentication first, the last AS-REQ gets the TGT and the TGS-REQ the
-            # service ticket. Windows sends the RSA-MD5 body checksum the KDC accepts for the TGS-REQ.
-            $asReq = @($actual | Where-Object { $_.Request.MessageType -eq 'AsReq' })
-            $tgsReq = @($actual | Where-Object { $_.Request.MessageType -eq 'TgsReq' })
-            $actual.Count | Should-Be ($asReq.Count + $tgsReq.Count)
-            $asReq.Count | Should-BeGreaterThan 0
-            if ($asReq.Count -gt 1) {
-                foreach ($rejected in $asReq[0..($asReq.Count - 2)]) {
-                    $rejected.ErrorCode | Should-Be ([Obol.Kerberos.ErrorCode]::PreAuthRequired)
-                    $rejected.ClientName | Should-Be 'user@EXAMPLE.TEST'
-                }
-            }
+            # Like kinit the SSP asks without pre-authentication first, then with the timestamp, and uses the TGT for
+            # the service ticket.
+            $actual.Count | Should-Be 3
+            [string[]]$actual.Request.MessageType | Should-BeCollection AsReq, AsReq, TgsReq
+            [string[]]$actual.Reply.MessageType | Should-BeCollection Error, AsRep, TgsRep
+            [string[]]$actual.ErrorCode | Should-BeCollection PreAuthRequired, None, None
+            $actual.ClientName | Should-BeCollection $upn, $upn, $upn
+            $actual.ServiceName | Should-BeCollection 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'HTTP/web.example.test@EXAMPLE.TEST'
+            $actual.Message | Should-BeCollection @(
+                "AS-REQ $upn -> krbtgt/EXAMPLE.TEST@EXAMPLE.TEST: PreAuthRequired"
+                "AS-REQ $upn -> krbtgt/EXAMPLE.TEST@EXAMPLE.TEST: AS-REP, Aes256Sha1 ticket and session key, PreAuthenticated, Initial, Renewable, Forwardable"
+                "TGS-REQ $upn -> HTTP/web.example.test@EXAMPLE.TEST: TGS-REP, Aes256Sha1 ticket and session key, PreAuthenticated, Renewable, Forwardable"
+            )
 
-            $tgt = $asReq[-1]
-            $tgt.ErrorCode | Should-Be ([Obol.Kerberos.ErrorCode]::None)
-            $tgt.ClientName | Should-Be 'user@EXAMPLE.TEST'
-            $tgt.ServiceName | Should-Be 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
-            [int[]]$tgt.Request.PreAuthData.Type | Should-ContainCollection 2
-            $tgt.Reply.Ticket.DecryptedPart.Flag.HasFlag([Obol.Kerberos.TicketFlag]::Initial) | Should-BeTrue
-            $tgt.Reply.Ticket.DecryptedPart.Flag.HasFlag([Obol.Kerberos.TicketFlag]::PreAuthenticated) | Should-BeTrue
-            $tgt.Reply.Ticket.DecryptedPart.Pac.LogonInfo.UserName | Should-Be user
-            $tgt.Key.FullName | Should-BeCollection 'user@EXAMPLE.TEST', 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
+            # Windows always asks for a PAC, sends its NetBIOS name as the address and prefers AES256.
+            [string[]]$actual[0].Request.PreAuthData.Type | Should-BeCollection @('PacRequest')
+            $actual[0].Request.PreAuthData[0].IncludePac | Should-BeTrue
+            $actual[0].Request.Body.KdcOption | Should-Be ([Obol.Kerberos.KdcOption]'Forwardable, Renewable, Canonicalize, RenewableOk')
+            $actual[0].Request.Body.EncryptionType[0] | Should-Be ([Obol.Kerberos.EncryptionType]::Aes256Sha1)
+            [string[]]$actual[0].Request.Body.Address.AddressType | Should-BeCollection @('NetBios')
+            $actual[0].Key.Count | Should-Be 0
+            # The error carries the salt and encryption types the client needs for the timestamp.
+            [string[]]$actual[0].Reply.MethodData.Type | Should-BeCollection EncTimestamp, ETypeInfo2
+            $etypeInfo = $actual[0].Reply.MethodData | Where-Object Type -eq ETypeInfo2
+            [string[]]$etypeInfo.Entry.EncryptionType | Should-BeCollection Aes256Sha1, Aes128Sha1
+            $etypeInfo.Entry.Salt | Should-BeCollection "EXAMPLE.TEST$user", "EXAMPLE.TEST$user"
 
-            $tgsReq.Count | Should-Be 1
-            $tgsReq[0].ErrorCode | Should-Be ([Obol.Kerberos.ErrorCode]::None)
-            $tgsReq[0].ClientName | Should-Be 'user@EXAMPLE.TEST'
-            $tgsReq[0].ServiceName | Should-Be 'HTTP/web.example.test@EXAMPLE.TEST'
-            [int[]]$tgsReq[0].Request.PreAuthData.Type | Should-ContainCollection 1
-            # Windows sends the RSA-MD5 body checksum the KDC accepts.
-            $tgsReq[0].Request.ApRequest.Authenticator.Checksum.ChecksumType | Should-Be 7
-            $service = $tgsReq[0].Reply.Ticket.DecryptedPart
-            $service.Key.EncryptionType | Should-Be 18
-            $tgsReq[0].Reply.Ticket.EncryptedPart.EncryptionType | Should-Be 18
-            $service.Flag.HasFlag([Obol.Kerberos.TicketFlag]::PreAuthenticated) | Should-BeTrue
-            $service.Flag.HasFlag([Obol.Kerberos.TicketFlag]::Initial) | Should-BeFalse
-            $service.Pac | Should-NotBeNull
-            $tgsReq[0].Key.FullName | Should-BeCollection 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'HTTP/web.example.test@EXAMPLE.TEST'
+            [string[]]$actual[1].Request.PreAuthData.Type | Should-BeCollection EncTimestamp, PacRequest
+            $timestamp = $actual[1].Request.PreAuthData | Where-Object Type -eq EncTimestamp
+            $timestamp.EncryptedData.EncryptionType | Should-Be ([Obol.Kerberos.EncryptionType]::Aes256Sha1)
+            $timestamp.Timestamp | Should-HaveType ([DateTime])
+            $tgt = $actual[1].Reply.Ticket.DecryptedPart
+            $tgt.Flag | Should-Be ([Obol.Kerberos.TicketFlag]'PreAuthenticated, Initial, Renewable, Forwardable')
+            $tgt.Pac.LogonInfo.UserName | Should-Be $user
+            $tgt.Pac.LogonInfo.DomainName | Should-Be EXAMPLE
+            [Convert]::ToHexString($actual[1].Reply.DecryptedPart.Key.Value) | Should-Be ([Convert]::ToHexString($tgt.Key.Value))
+            $actual[1].Key.FullName | Should-BeCollection $upn, 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST'
+
+            # PA-TGS-REQ carries the TGT, Windows adds PA-PAC-OPTIONS.
+            $actual[2].Request | Should-HaveType ([Obol.Kerberos.TgsRequest])
+            [string[]]$actual[2].Request.PreAuthData.Type | Should-BeCollection TgsReq, PacOptions
+            $actual[2].Request.Body.KdcOption | Should-Be ([Obol.Kerberos.KdcOption]'Forwardable, Renewable, Canonicalize')
+            # The authenticator has no subkey, so the restrictions Windows sends in the body's authorization data are
+            # encrypted with the TGT session key.
+            $actual[2].Request.Body.EncryptedAuthorizationData.EncryptionType | Should-Be ([Obol.Kerberos.EncryptionType]::Aes256Sha1)
+            $apReq = $actual[2].Request.ApRequest
+            $apReq.Ticket.DecryptedPart.ClientName.FullName | Should-Be $upn
+            [Convert]::ToHexString($apReq.Ticket.DecryptedPart.Key.Value) | Should-Be ([Convert]::ToHexString($tgt.Key.Value))
+            $apReq.Authenticator.ClientName.FullName | Should-Be $upn
+            $apReq.Authenticator.Subkey | Should-BeNull
+            # Windows uses the unkeyed RSA-MD5 body checksum whatever the session key type.
+            $apReq.Authenticator.Checksum.ChecksumType | Should-Be ([Obol.Kerberos.ChecksumType]::RsaMd5)
+            $service = $actual[2].Reply.Ticket.DecryptedPart
+            $service.Key.EncryptionType | Should-Be ([Obol.Kerberos.EncryptionType]::Aes256Sha1)
+            $actual[2].Reply.Ticket.EncryptedPart.EncryptionType | Should-Be ([Obol.Kerberos.EncryptionType]::Aes256Sha1)
+            $service.Flag | Should-Be ([Obol.Kerberos.TicketFlag]'PreAuthenticated, Renewable, Forwardable')
+            $service.Pac.LogonInfo.UserName | Should-Be $user
+            $actual[2].Key.FullName | Should-BeCollection 'krbtgt/EXAMPLE.TEST@EXAMPLE.TEST', 'HTTP/web.example.test@EXAMPLE.TEST'
         }
 
         It "Fails for an unknown service" {
@@ -989,14 +1021,15 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
         }
 
         It "Mutually authenticates NegotiateAuthentication to a service with the exported keytab" {
+            $user = New-UniqueUserName
             $actual = Use-ObolSspiEnvironment MUTUAL.TEST -Principal @{
-                user = $password
+                $user = $password
                 'HTTP/web.mutual.test' = $null
             } {
                 param ($kdc)
 
                 $keytab = $kdc | ConvertTo-ObolKeytab HTTP/web.mutual.test
-                Invoke-NegotiateExchange -Realm MUTUAL.TEST -Keytab $keytab -AcceptorToken $systemToken
+                Invoke-NegotiateExchange -User $user -Realm MUTUAL.TEST -Keytab $keytab -AcceptorToken $systemToken
             }
 
             # With mutual auth the first token needs the AP-REP before the client is done.
@@ -1004,7 +1037,7 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
             $actual.FirstStatus | Should-Be ([NegotiateAuthenticationStatusCode]::ContinueNeeded)
             $actual.Status | Should-Be ([NegotiateAuthenticationStatusCode]::Completed)
             $actual.IsMutuallyAuthenticated | Should-BeTrue
-            $actual.ClientName | Should-Be 'MUTUAL\user'
+            $actual.ClientName | Should-Be "MUTUAL\$user"
         }
     }
 
@@ -1046,20 +1079,21 @@ Describe "Windows SSPI" -Skip:(-not $IsWindows) {
 
         It "Mutually authenticates NegotiateAuthentication to a NoAuthDataRequired service" {
             $service = New-ObolPrincipalSetting -Flag NoAuthDataRequired
+            $user = New-UniqueUserName
             $actual = Use-ObolSspiEnvironment NOPAC.TEST -Principal @{
-                user = $password
+                $user = $password
                 'HTTP/web.nopac.test' = $service
             } {
                 param ($kdc)
 
                 $keytab = $kdc | ConvertTo-ObolKeytab HTTP/web.nopac.test
-                Invoke-NegotiateExchange -Realm NOPAC.TEST -Keytab $keytab
+                Invoke-NegotiateExchange -User $user -Realm NOPAC.TEST -Keytab $keytab
             }
 
             $actual.AcceptorCompleted | Should-BeTrue
             $actual.Status | Should-Be ([NegotiateAuthenticationStatusCode]::Completed)
             $actual.IsMutuallyAuthenticated | Should-BeTrue
-            $actual.ClientName | Should-Be 'NOPAC.TEST\user'
+            $actual.ClientName | Should-Be "NOPAC.TEST\$user"
         }
     }
 }
