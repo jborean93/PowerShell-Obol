@@ -974,6 +974,23 @@ public class KdcProcessorTests
     }
 
     [Test]
+    public async Task StampsErrorWithServerTime()
+    {
+        TestRealm realm = new();
+        // 12:00:00.1234567, the microseconds go in susec and the seconds in stime.
+        realm.Clock.Now = s_start.AddTicks(1234567);
+
+        KrbError error = KrbError.DecodeApplication(realm.Send(NewAsReq("nobody", null, s_start)));
+
+        await Assert.That(error.ErrorCode).IsEqualTo(KerberosErrorCode.KDC_ERR_C_PRINCIPAL_UNKNOWN);
+        await Assert.That(error.STime).IsEqualTo(s_start);
+        await Assert.That(error.Susc).IsEqualTo(123456);
+        // The KDC does not echo the client's time.
+        await Assert.That(error.CTime).IsNull();
+        await Assert.That(error.Cusec).IsNull();
+    }
+
+    [Test]
     public async Task ReportsRequestedServiceInError()
     {
         TestRealm realm = new();

@@ -136,7 +136,12 @@ internal sealed class KdcProcessor
             SName = sname ?? _krbtgtName,
             EData = errorData,
         };
-        error.StampServerTime();
+
+        // Not KrbError.StampServerTime(), it puts the microseconds in cusec and leaves susec 0 (Kerberos.NET 4.6).
+        DateTimeOffset now = _time.GetUtcNow();
+        long subSecondTicks = now.Ticks % TimeSpan.TicksPerSecond;
+        error.STime = now.AddTicks(-subSecondTicks);
+        error.Susc = (int)(subSecondTicks / TimeSpan.TicksPerMicrosecond);
 
         return error;
     }
