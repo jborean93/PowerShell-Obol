@@ -133,7 +133,7 @@
             ReleaseNotes = 'See https://github.com/jborean93/PowerShell-Obol/blob/main/CHANGELOG.md'
 
             # Prerelease string of this module
-            Prerelease = 'beta1'
+            # Prerelease = ''
 
             # Flag to indicate whether the module requires explicit user acceptance for install/update/save
             # RequireLicenseAcceptance = $false
